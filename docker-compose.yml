@@ -1,0 +1,33 @@
+# Both services run the same image. Start with: docker compose up -d --build
+x-desk: &desk
+  image: memecoin-desk:local
+  env_file: .env
+  environment:
+    TZ: ${TZ:-Europe/Berlin}    # log and dashboard times; data is stored in UTC
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  desk:
+    <<: *desk
+    build: .
+    volumes:
+      - ./data:/app/data            # SQLite state: positions survive restarts
+      - ./logs:/app/logs            # debate transcripts, events, desk.log
+      - ./secrets:/app/secrets:ro   # wallet key, only read in live mode
+    stop_grace_period: 30s
+
+  dashboard:
+    <<: *desk
+    pull_policy: never              # reuse the image the desk service builds
+    depends_on: [desk]
+    command: ["ui", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:8501:8501"       # http://localhost:8501, not reachable from the network
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs:ro
