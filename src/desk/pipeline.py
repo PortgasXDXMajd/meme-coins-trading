@@ -9,13 +9,12 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from desk.agents.executor import Executor
-from desk.agents.filter import Filter
 from desk.agents.risk import RiskOfficer
-from desk.agents.scout import Scout
 from desk.config import Settings
 from desk.debate import Debate
 from desk.domain.models import Candidate, DebateOutcome, FilterVerdict, Position, utcnow
 from desk.dossier import build_dossier
+from desk.ports import TokenFilter, TokenScout
 from desk.storage.db import Store
 from desk.storage.debate_log import EventLog, write_transcript
 
@@ -25,8 +24,8 @@ log = logging.getLogger(__name__)
 class Pipeline:
     def __init__(
         self,
-        scout: Scout,
-        filter_: Filter,
+        scout: TokenScout,
+        filter_: TokenFilter,
         debate: Debate,
         risk: RiskOfficer,
         executor: Executor,

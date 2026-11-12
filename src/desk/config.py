@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", frozen=True)
@@ -60,7 +62,7 @@ class Settings(BaseSettings):
 
     # --- llm ---------------------------------------------------------------
     debate_model: str = "claude-opus-5-5"
-    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    llm_effort: Effort = "high"
     max_evidence_tool_rounds: int = 6
     lessons_in_prompt: int = 8
 

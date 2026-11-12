@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
+from pydantic_settings import SettingsConfigDict
 
 from desk.config import Settings
 from desk.domain.models import (
@@ -17,6 +18,7 @@ from desk.domain.models import (
     BearCase,
     BearReason,
     Candidate,
+    Fill,
     FilterVerdict,
     LLMUsage,
     Rebuttal,
@@ -37,14 +39,32 @@ def load_fixture(name: str) -> Any:
     return json.loads((FIXTURES / name).read_text())
 
 
+class IsolatedSettings(Settings):
+    """Settings that never read the developer's real .env file."""
+
+    model_config = SettingsConfigDict(env_file=None)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(
-        anthropic_api_key="test-key",
+    return IsolatedSettings(
+        anthropic_api_key=SecretStr("test-key"),
         data_dir=tmp_path / "data",
         log_dir=tmp_path / "logs",
-        _env_file=None,
     )
+
+
+class CashOnlyBroker:
+    """A broker for tests that only need a balance; it refuses to trade."""
+
+    async def cash_usd(self, sol_price_usd: float) -> float:
+        return 250.0
+
+    async def buy(self, mint: str, usd: float, sol_price_usd: float) -> Fill:
+        raise AssertionError("this test should not buy")
+
+    async def sell(self, mint: str, token_amount_raw: int, sol_price_usd: float) -> Fill:
+        raise AssertionError("this test should not sell")
 
 
 @pytest.fixture

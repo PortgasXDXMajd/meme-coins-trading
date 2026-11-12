@@ -40,12 +40,15 @@ class FakeMarket:
         self.price = candidate.price_usd
         self.sell_route = True
 
-    # DexScreener
-    async def snapshot(self, mint: str) -> Candidate | None:
+    def _at_current_price(self) -> Candidate:
         return self.candidate.model_copy(update={"price_usd": self.price})
 
+    # DexScreener
+    async def snapshot(self, mint: str) -> Candidate | None:
+        return self._at_current_price()
+
     async def snapshots(self, mints: list[str]) -> dict[str, Candidate]:
-        return {m: await self.snapshot(m) for m in mints}
+        return {m: self._at_current_price() for m in mints}
 
     # Jupiter
     async def buy_quote(self, mint: str, lamports: int, taker: str | None = None) -> Order:
@@ -61,14 +64,14 @@ class FakeMarket:
             request_id="q",
         )
 
-    async def sell_quote(self, mint: str, tokens: int, taker: str | None = None) -> Order:
+    async def sell_quote(self, mint: str, token_amount: int, taker: str | None = None) -> Order:
         if not self.sell_route:
             raise DataError("no route")
-        value = tokens * self.price
+        value = token_amount * self.price
         return Order(
             input_mint=mint,
             output_mint="SOL",
-            in_amount=tokens,
+            in_amount=token_amount,
             out_amount=1,
             in_usd=value,
             out_usd=value * (1 - FEE_RATE),
@@ -215,6 +218,7 @@ async def test_stop_loss_sells_at_minus_six_percent(settings, store):
     assert closed.pnl_pct is not None and closed.pnl_pct < -6  # price loss plus costs
     assert store.open_positions() == []
     assert desk.closed == [closed]
+    assert closed.proceeds_usd is not None
     assert await desk.portfolio.cash_usd(80) == pytest.approx(
         250 - position.cost_usd + closed.proceeds_usd
     )

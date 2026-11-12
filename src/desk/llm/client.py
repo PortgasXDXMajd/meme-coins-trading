@@ -15,9 +15,14 @@ from importlib import resources
 from typing import Any, Protocol
 
 import anthropic
+from anthropic.types.beta import (
+    BetaMessageParam,
+    BetaOutputConfigParam,
+    BetaToolResultBlockParam,
+)
 from pydantic import BaseModel
 
-from desk.config import Settings
+from desk.config import Effort, Settings
 from desk.domain.models import LLMUsage
 
 log = logging.getLogger(__name__)
@@ -92,18 +97,18 @@ class ClaudeLLM:
         client: anthropic.AsyncAnthropic,
         *,
         model: str,
-        effort: str,
+        effort: Effort,
         max_tool_rounds: int,
     ) -> None:
         self._client = client
         self._model = model
-        self._effort = effort
+        self._effort: Effort = effort
         self._max_tool_rounds = max_tool_rounds
 
     async def ask[T: BaseModel](
         self, *, system: str, user: str, output_type: type[T], tools: Sequence[Tool] = ()
     ) -> LLMResult[T]:
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
+        messages: list[BetaMessageParam] = [{"role": "user", "content": user}]
         handlers = {tool.name: tool.handler for tool in tools}
         usage = LLMUsage()
 
@@ -138,11 +143,12 @@ class ClaudeLLM:
     async def _request(
         self,
         system: str,
-        messages: list[dict[str, Any]],
+        messages: list[BetaMessageParam],
         output_type: type[BaseModel],
         tools: Sequence[Tool],
     ) -> Any:
         kwargs: dict[str, Any] = {}
+        output_config: BetaOutputConfigParam = {"effort": self._effort}
         if tools:
             kwargs["tools"] = [tool.definition() for tool in tools]
         try:
@@ -152,7 +158,7 @@ class ClaudeLLM:
                 system=system,
                 messages=messages,
                 output_format=output_type,
-                output_config={"effort": self._effort},
+                output_config=output_config,
                 betas=[FALLBACK_BETA],
                 fallbacks="default",
                 **kwargs,
@@ -169,8 +175,8 @@ class ClaudeLLM:
         block: Any,
         handlers: dict[str, Callable[[dict[str, Any]], Awaitable[str]]],
         budget_left: bool,
-    ) -> dict[str, Any]:
-        def result(content: str, *, is_error: bool = False) -> dict[str, Any]:
+    ) -> BetaToolResultBlockParam:
+        def result(content: str, *, is_error: bool = False) -> BetaToolResultBlockParam:
             return {
                 "type": "tool_result",
                 "tool_use_id": block.id,

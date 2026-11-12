@@ -364,7 +364,7 @@ def render_positions(snapshot: Snapshot) -> None:
     st.altair_chart(equity_chart(curve), width="stretch")
 
 
-def equity_chart(curve: list[tuple[datetime, float]]) -> alt.LayerChart:
+def equity_chart(curve: list[tuple[datetime, float]]) -> alt.LayerChart | alt.FacetChart:
     frame = pd.DataFrame(
         {"Closed": [local(at) for at, _ in curve], "Equity": [v for _, v in curve]}
     )
@@ -378,7 +378,7 @@ def equity_chart(curve: list[tuple[datetime, float]]) -> alt.LayerChart:
     )
     line = base.mark_line(interpolate="step-after", strokeWidth=2)
     points = base.mark_point(size=70, filled=True)
-    return (line + points).properties(height=260)
+    return alt.layer(line, points, height=260)
 
 
 # --- lessons and log -------------------------------------------------------

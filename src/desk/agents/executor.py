@@ -6,7 +6,6 @@ import logging
 
 from desk.brokers.base import Broker, BrokerError
 from desk.config import Settings
-from desk.data.dexscreener import DexScreener
 from desk.data.http import DataError
 from desk.domain.models import ExitReason, Position, TradeApproval, utcnow
 from desk.domain.rules import (
@@ -16,6 +15,7 @@ from desk.domain.rules import (
     position_size_usd,
 )
 from desk.portfolio import Portfolio
+from desk.ports import PriceFeed
 from desk.storage.db import Store
 from desk.storage.debate_log import EventLog
 
@@ -26,7 +26,7 @@ class Executor:
     def __init__(
         self,
         broker: Broker,
-        dex: DexScreener,
+        dex: PriceFeed,
         portfolio: Portfolio,
         store: Store,
         settings: Settings,

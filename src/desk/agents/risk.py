@@ -17,9 +17,7 @@ from desk.agents.bear import render_reasons, render_token_header
 from desk.agents.executor import Executor
 from desk.brokers.base import BrokerError
 from desk.config import Settings
-from desk.data.dexscreener import DexScreener
 from desk.data.http import DataError
-from desk.data.jupiter import Jupiter
 from desk.domain.models import (
     BearReason,
     DebateOutcome,
@@ -34,6 +32,7 @@ from desk.domain.models import (
 from desk.domain.rules import check_stop, daily_loss_breached, position_size_usd
 from desk.llm.client import LLMResult, StructuredLLM, debate_prompt
 from desk.portfolio import Portfolio
+from desk.ports import PriceFeed, QuoteSource
 from desk.storage.db import Store
 from desk.storage.debate_log import EventLog
 
@@ -122,8 +121,8 @@ class RiskOfficer:
 class StopMonitor:
     def __init__(
         self,
-        dex: DexScreener,
-        jupiter: Jupiter,
+        dex: PriceFeed,
+        jupiter: QuoteSource,
         executor: Executor,
         store: Store,
         settings: Settings,

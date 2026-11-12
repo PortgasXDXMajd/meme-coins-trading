@@ -7,15 +7,16 @@ import itertools
 from desk.brokers.base import BrokerError
 from desk.config import Settings
 from desk.data.http import DataError
-from desk.data.jupiter import Jupiter, usd_to_lamports
+from desk.data.jupiter import usd_to_lamports
 from desk.domain.models import Fill
+from desk.ports import QuoteSource
 from desk.storage.db import Store
 
 CASH_KEY = "paper_cash_usd"
 
 
 class PaperBroker:
-    def __init__(self, jupiter: Jupiter, store: Store, settings: Settings) -> None:
+    def __init__(self, jupiter: QuoteSource, store: Store, settings: Settings) -> None:
         self._jupiter = jupiter
         self._store = store
         self._network_fee_usd = settings.paper_network_fee_usd

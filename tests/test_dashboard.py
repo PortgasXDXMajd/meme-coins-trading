@@ -26,15 +26,18 @@ from desk.domain.models import Position
 from desk.dossier import build_dossier
 from desk.portfolio import Portfolio
 from desk.storage.db import Store
-from tests.conftest import NOW, FakeLLM, analyst_response, bear_case, make_verdict, referee_decision
+from tests.conftest import (
+    NOW,
+    CashOnlyBroker,
+    FakeLLM,
+    analyst_response,
+    bear_case,
+    make_verdict,
+    referee_decision,
+)
 
 APP = Path(__file__).parents[1] / "src" / "desk" / "dashboard" / "app.py"
 SINCE = NOW - timedelta(days=1)
-
-
-class NoBroker:
-    async def cash_usd(self, sol_price_usd: float) -> float:
-        return 250.0
 
 
 def make_position(**overrides) -> Position:
@@ -61,7 +64,7 @@ async def seed_desk(settings) -> None:
         "MintA", "RUG", "filtered", {"kills": ["lp_not_burned: LP 61.8% < 99%"]}, NOW
     )
     llm = FakeLLM(bear_case(), analyst_response(), referee_decision(unrebutted=(2,)))
-    referee = RiskOfficer(llm, Portfolio(NoBroker(), store), store, settings)
+    referee = RiskOfficer(llm, Portfolio(CashOnlyBroker(), store), store, settings)
     debate = Debate(
         Bear(llm, settings), Analyst(llm, settings), referee, tool_factory=lambda d, ledger: []
     )

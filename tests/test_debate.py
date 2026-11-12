@@ -22,6 +22,7 @@ from desk.portfolio import Portfolio
 from desk.storage.debate_log import render_transcript
 from tests.conftest import (
     NOW,
+    CashOnlyBroker,
     FakeLLM,
     analyst_response,
     bear_case,
@@ -30,18 +31,13 @@ from tests.conftest import (
 )
 
 
-class NoBroker:
-    async def cash_usd(self, sol_price_usd: float) -> float:
-        return 250.0
-
-
 @pytest.fixture
 def dossier(settings):
     return build_dossier(make_verdict(), settings, NOW)
 
 
 def make_debate(llm: FakeLLM, settings, store) -> Debate:
-    referee = RiskOfficer(llm, Portfolio(NoBroker(), store), store, settings)
+    referee = RiskOfficer(llm, Portfolio(CashOnlyBroker(), store), store, settings)
     return Debate(
         Bear(llm, settings),
         Analyst(llm, settings),
@@ -133,14 +129,14 @@ async def test_trade_approval_cannot_be_built_from_a_veto(dossier, settings, sto
     with pytest.raises(ValidationError):
         TradeApproval(outcome=vetoed, stop_loss_pct=6, max_size_usd=20)
 
-    referee = RiskOfficer(llm, Portfolio(NoBroker(), store), store, settings)
+    referee = RiskOfficer(llm, Portfolio(CashOnlyBroker(), store), store, settings)
     assert await referee.approve(vetoed) is None
 
 
 async def test_risk_sets_the_stop_before_entry(dossier, settings, store):
     llm = FakeLLM(bear_case(), analyst_response(), referee_decision())
     outcome = await run(llm, dossier, settings, store)
-    referee = RiskOfficer(llm, Portfolio(NoBroker(), store), store, settings)
+    referee = RiskOfficer(llm, Portfolio(CashOnlyBroker(), store), store, settings)
     approval = await referee.approve(outcome)
     assert approval is not None
     assert approval.stop_loss_pct == 6
