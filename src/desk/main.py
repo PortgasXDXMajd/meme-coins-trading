@@ -85,7 +85,7 @@ def _secret(value: object) -> str | None:
 
 def build_broker(settings: Settings, jupiter: Jupiter, rpc: SolanaRpc, store: Store) -> Broker:
     if not settings.is_live:
-        return PaperBroker(jupiter, store, settings)
+        return PaperBroker(jupiter.urgent(), store, settings)
     broker = JupiterLiveBroker(jupiter, rpc, load_keypair(settings.wallet_keyfile))
     log.warning("LIVE TRADING with wallet %s. Real funds are at risk.", broker.address)
     return broker
@@ -138,7 +138,13 @@ async def build_desk(settings: Settings) -> AsyncGenerator[Desk]:
             events,
         )
         monitor = StopMonitor(
-            dex, jupiter, executor, store, settings, events, on_close=PostMortem(llm, store).review
+            dex,
+            jupiter.urgent(),
+            executor,
+            store,
+            settings,
+            events,
+            on_close=PostMortem(llm, store).review,
         )
         try:
             yield Desk(settings, store, llm, pipeline, monitor)

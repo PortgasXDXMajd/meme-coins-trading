@@ -89,7 +89,9 @@ class JupiterLiveBroker:
 
     async def sell(self, mint: str, token_amount_raw: int, sol_price_usd: float) -> Fill:
         try:
-            order = await self._jupiter.sell_quote(mint, token_amount_raw, taker=self._address)
+            order = await self._jupiter.sell_quote(
+                mint, token_amount_raw, taker=self._address, urgent=True
+            )
             execution = await self._jupiter.execute(
                 sign_order(order, self._keypair), order.request_id
             )

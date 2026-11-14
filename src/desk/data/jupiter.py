@@ -72,8 +72,18 @@ class Jupiter:
         interval = KEYED_INTERVAL_SECONDS if api_key else KEYLESS_INTERVAL_SECONDS
         self._limiter = RateLimiter(interval)
 
+    def urgent(self) -> UrgentQuotes:
+        """Quotes that go ahead of queued normal requests. For exits only."""
+        return UrgentQuotes(self)
+
     async def order(
-        self, input_mint: str, output_mint: str, amount: int, taker: str | None = None
+        self,
+        input_mint: str,
+        output_mint: str,
+        amount: int,
+        taker: str | None = None,
+        *,
+        urgent: bool = False,
     ) -> Order:
         """Quote a swap. With `taker`, the response also carries a transaction to sign."""
         params: dict[str, str | int] = {
@@ -88,16 +98,21 @@ class Jupiter:
             "GET",
             f"{BASE_URL}/order",
             limiter=self._limiter,
+            urgent=urgent,
             params=params,
             headers=self._headers,
         )
         return parse_order(raw)
 
-    async def buy_quote(self, mint: str, lamports: int, taker: str | None = None) -> Order:
-        return await self.order(SOL_MINT, mint, lamports, taker)
+    async def buy_quote(
+        self, mint: str, lamports: int, taker: str | None = None, *, urgent: bool = False
+    ) -> Order:
+        return await self.order(SOL_MINT, mint, lamports, taker, urgent=urgent)
 
-    async def sell_quote(self, mint: str, token_amount: int, taker: str | None = None) -> Order:
-        return await self.order(mint, SOL_MINT, token_amount, taker)
+    async def sell_quote(
+        self, mint: str, token_amount: int, taker: str | None = None, *, urgent: bool = False
+    ) -> Order:
+        return await self.order(mint, SOL_MINT, token_amount, taker, urgent=urgent)
 
     async def round_trip(self, mint: str, size_usd: float, sol_price_usd: float) -> RoundTrip:
         """Quote a buy then selling it straight back. Proves an exit route exists."""
@@ -130,3 +145,19 @@ class Jupiter:
             total_input_amount=int(raw["totalInputAmount"]),
             total_output_amount=int(raw["totalOutputAmount"]),
         )
+
+
+class UrgentQuotes:
+    """A view of `Jupiter` whose quotes jump the queue: stop checks and the sells they trigger.
+
+    It shares Jupiter's rate limit, so it never exceeds the API key's budget.
+    """
+
+    def __init__(self, jupiter: Jupiter) -> None:
+        self._jupiter = jupiter
+
+    async def buy_quote(self, mint: str, lamports: int, taker: str | None = None) -> Order:
+        return await self._jupiter.buy_quote(mint, lamports, taker, urgent=True)
+
+    async def sell_quote(self, mint: str, token_amount: int, taker: str | None = None) -> Order:
+        return await self._jupiter.sell_quote(mint, token_amount, taker, urgent=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from typing import Any
 
@@ -16,19 +17,37 @@ class DataError(Exception):
 
 
 class RateLimiter:
-    """Spaces calls at least `min_interval` seconds apart."""
+    """Spaces calls at least `min_interval` seconds apart.
+
+    Urgent callers (stop-loss quotes) are served before any normal caller that is
+    still waiting, so they wait at most one interval. The spacing applies to both.
+    """
 
     def __init__(self, min_interval: float) -> None:
         self._min_interval = min_interval
-        self._lock = asyncio.Lock()
+        self._changed = asyncio.Condition()
         self._next_allowed = 0.0
+        self._urgent_waiting = 0
 
-    async def wait(self) -> None:
-        async with self._lock:
-            delay = self._next_allowed - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            self._next_allowed = time.monotonic() + self._min_interval
+    async def wait(self, *, urgent: bool = False) -> None:
+        async with self._changed:
+            if urgent:
+                self._urgent_waiting += 1
+            try:
+                while True:
+                    if not urgent and self._urgent_waiting:
+                        await self._changed.wait()
+                        continue
+                    delay = self._next_allowed - time.monotonic()
+                    if delay <= 0:
+                        break
+                    with contextlib.suppress(TimeoutError):  # woken early or slot reached
+                        await asyncio.wait_for(self._changed.wait(), delay)
+                self._next_allowed = time.monotonic() + self._min_interval
+            finally:
+                if urgent:
+                    self._urgent_waiting -= 1
+                self._changed.notify_all()
 
 
 async def request_json(
@@ -37,6 +56,7 @@ async def request_json(
     url: str,
     *,
     limiter: RateLimiter | None = None,
+    urgent: bool = False,
     retries: int = 2,
     **kwargs: Any,
 ) -> Any:
@@ -44,7 +64,7 @@ async def request_json(
     last_error = "no attempt made"
     for attempt in range(retries + 1):
         if limiter:
-            await limiter.wait()
+            await limiter.wait(urgent=urgent)
         try:
             response = await client.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
