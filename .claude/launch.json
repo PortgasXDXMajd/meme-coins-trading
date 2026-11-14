@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-dev",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "desk", "ui", "--port", "8502"],
+      "port": 8502
+    }
+  ]
+}
