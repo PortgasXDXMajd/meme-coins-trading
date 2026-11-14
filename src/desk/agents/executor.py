@@ -15,7 +15,7 @@ from desk.domain.rules import (
     position_size_usd,
 )
 from desk.portfolio import Portfolio
-from desk.ports import PriceFeed
+from desk.ports import PriceFeed, QuoteSource
 from desk.storage.db import Store
 from desk.storage.debate_log import EventLog
 
@@ -31,8 +31,11 @@ class Executor:
         store: Store,
         settings: Settings,
         events: EventLog,
+        *,
+        quotes: QuoteSource | None = None,
     ) -> None:
         self._broker = broker
+        self._quotes = quotes
         self._dex = dex
         self._portfolio = portfolio
         self._store = store
@@ -81,6 +84,7 @@ class Executor:
                 stop_price_usd=initial_stop_price(entry, self._settings),
                 high_water_price_usd=entry,
                 last_price_usd=entry,
+                quote_basis_usd=await self._quote_basis(approved.mint, fill.token_amount_raw),
                 debate_id=debate_id,
             )
         )
@@ -120,6 +124,16 @@ class Executor:
         )
         self._events.emit("sell", position=closed.model_dump(mode="json"), tx_id=fill.tx_id)
         return closed
+
+    async def _quote_basis(self, mint: str, token_amount_raw: int) -> float | None:
+        """Sell-quote value of the new position, the reference for quote-priced stops."""
+        if self._quotes is None:
+            return None
+        try:
+            return (await self._quotes.sell_quote(mint, token_amount_raw)).out_usd
+        except DataError as exc:
+            log.warning("executor: no reference quote for %s, stop calibrates later: %s", mint, exc)
+            return None
 
     def _skip(self, symbol: str, why: str) -> None:
         log.info("executor: skipped %s: %s", symbol, why)

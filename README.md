@@ -57,7 +57,7 @@ To stop new entries without stopping the desk, create `data/HALT`. Open position
 - `logs/debates/<date>/<time>-<symbol>-<mint>.md` — the full debate for every token that passed the Filter: dossier, three reasons, three rebuttals, three rulings, evidence gathered.
 - `logs/desk.log` — everything the desk did, in order.
 - `logs/events.jsonl` — the same as structured records (kills, debates, buys, sells).
-- `data/desk.db` — SQLite: positions, debates, lessons, paper cash.
+- `data/desk.db` — SQLite: positions, debates, lessons, paper cash, and `price_checks` (every stop-monitor pass: the Jupiter quote price, the DexScreener price, which one was used, the stop and the high).
 
 ## Settings
 
@@ -76,7 +76,7 @@ Live trading is built but has not been run with real funds. Do these in order:
 
 Things to know before risking money:
 
-- Stops are market sells triggered by a 5-second price poll. A fast dump fills below −6%.
+- Stops are market sells triggered by a 5-second poll. Each poll prices the position from a live Jupiter sell quote (DexScreener can lag a dump) and falls back to DexScreener when no quote comes back. A dump faster than one poll still fills below −6%.
 - A round trip costs roughly 1–4% on these tokens (pool fees, Jupiter's fee, price impact). Paper P&L already includes it because fills use real quotes.
 - The wallet key sits unencrypted on this machine. Keep only the trading bankroll in it.
 

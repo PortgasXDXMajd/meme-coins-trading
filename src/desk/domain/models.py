@@ -302,6 +302,9 @@ class Position(Frozen):
     token_amount_raw: int
     cost_usd: float
     entry_price_usd: float  # market price when the buy filled; stops key off this
+    # What a sell quote paid for the whole position right after entry. Later quotes
+    # are scaled against it, so a live quote reads as a price on the entry's scale.
+    quote_basis_usd: float | None = None
     stop_price_usd: float
     high_water_price_usd: float
     last_price_usd: float

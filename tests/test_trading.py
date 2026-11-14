@@ -37,11 +37,13 @@ class FakeMarket:
 
     def __init__(self, candidate: Candidate) -> None:
         self.candidate = candidate
-        self.price = candidate.price_usd
+        self.price = candidate.price_usd  # what the pool pays (Jupiter)
+        self.dex_price: float | None = None  # set to make DexScreener lag behind the pool
         self.sell_route = True
 
     def _at_current_price(self) -> Candidate:
-        return self.candidate.model_copy(update={"price_usd": self.price})
+        shown = self.price if self.dex_price is None else self.dex_price
+        return self.candidate.model_copy(update={"price_usd": shown})
 
     # DexScreener
     async def snapshot(self, mint: str) -> Candidate | None:
@@ -109,7 +111,9 @@ class Desk:
         events = EventLog(settings.log_dir)
         broker = PaperBroker(self.market, store, settings)
         self.portfolio = Portfolio(broker, store)
-        self.executor = Executor(broker, self.market, self.portfolio, store, settings, events)
+        self.executor = Executor(
+            broker, self.market, self.portfolio, store, settings, events, quotes=self.market
+        )
         self.risk = RiskOfficer(llm, self.portfolio, store, settings, clock=lambda: NOW)
         self.closed: list = []
 
@@ -279,3 +283,62 @@ async def test_halt_file_blocks_new_entries(settings, store):
     settings.halt_file.touch()
     assert await desk.pipeline.run_cycle() == []
     assert desk.llm.calls == []  # no money spent debating while halted
+
+
+async def test_stop_fires_on_the_sell_quote_when_the_price_feed_lags(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    await desk.pipeline.run_cycle()
+    desk.market.dex_price = 0.001  # DexScreener still shows the entry price
+    desk.market.price = 0.0009  # but the pool would only pay 10% less
+
+    (closed,) = await desk.monitor.check_positions()
+    assert closed.exit_reason is ExitReason.STOP_LOSS
+    assert closed.exit_price_usd == pytest.approx(0.0009)
+
+
+async def test_price_feed_is_the_fallback_when_no_quote_comes_back(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    await desk.pipeline.run_cycle()
+    desk.market.sell_route = False
+    desk.market.price = 0.00097
+
+    assert await desk.monitor.check_positions() == []
+    (check,) = store.price_checks()
+    assert check.source == "dex"
+    assert check.quote_price_usd is None
+    assert check.used_price_usd == pytest.approx(0.00097)
+
+
+async def test_every_price_check_is_recorded(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    (position,) = await desk.pipeline.run_cycle()
+    desk.market.price = 0.00098
+    await desk.monitor.check_positions()
+    desk.market.price = 0.0009
+    await desk.monitor.check_positions()
+
+    first, second = store.price_checks(position.id)
+    assert first.source == "quote"
+    assert first.quote_price_usd == pytest.approx(0.00098)
+    assert first.dex_price_usd == pytest.approx(0.00098)
+    assert first.exit_reason is None
+    assert second.exit_reason is ExitReason.STOP_LOSS
+    assert second.stop_price_usd == pytest.approx(0.00094)
+
+
+async def test_position_without_a_quote_basis_calibrates_on_its_first_check(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    (position,) = await desk.pipeline.run_cycle()
+    store.update_position(position.model_copy(update={"quote_basis_usd": None}))
+    desk.market.price = 0.0011
+
+    assert await desk.monitor.check_positions() == []
+    (held,) = store.open_positions()
+    assert held.quote_basis_usd is not None
+    assert held.last_price_usd == pytest.approx(0.0011)  # matches the feed at calibration
+
+    desk.market.dex_price = 0.0011  # feed freezes; the quote now leads
+    desk.market.price = 0.001
+    await desk.monitor.check_positions()
+    (held,) = store.open_positions()
+    assert held.last_price_usd == pytest.approx(0.001)

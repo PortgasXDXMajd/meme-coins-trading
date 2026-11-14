@@ -6,11 +6,11 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from desk.domain.models import DebateOutcome, Position, utcnow
+from desk.domain.models import DebateOutcome, ExitReason, Position, utcnow
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (
@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS positions (
     closed_at TEXT,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS price_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_price_checks_position ON price_checks (position_id);
 CREATE TABLE IF NOT EXISTS lessons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at TEXT NOT NULL,
@@ -82,6 +88,24 @@ class LessonRecord(BaseModel):
     at: datetime
     symbol: str
     text: str
+
+
+class PriceCheck(BaseModel):
+    """One stop-monitor pass over one position: what each source said and what was used."""
+
+    model_config = ConfigDict(frozen=True)
+
+    at: datetime
+    position_id: int
+    symbol: str
+    source: Literal["quote", "dex"]
+    used_price_usd: float
+    quote_price_usd: float | None
+    dex_price_usd: float | None
+    stop_price_usd: float
+    high_water_price_usd: float
+    trailing_active: bool
+    exit_reason: ExitReason | None = None
 
 
 class Store:
@@ -232,6 +256,23 @@ class Store:
             (since.isoformat() if since else "",),
         )
         return [Position.model_validate_json(row["data"]) for row in rows.fetchall()]
+
+    # --- price checks --------------------------------------------------------
+
+    def record_price_check(self, check: PriceCheck) -> None:
+        self._db.execute(
+            "INSERT INTO price_checks (position_id, data) VALUES (?, ?)",
+            (check.position_id, check.model_dump_json()),
+        )
+
+    def price_checks(self, position_id: int | None = None) -> list[PriceCheck]:
+        if position_id is None:
+            rows = self._db.execute("SELECT data FROM price_checks ORDER BY id")
+        else:
+            rows = self._db.execute(
+                "SELECT data FROM price_checks WHERE position_id = ? ORDER BY id", (position_id,)
+            )
+        return [PriceCheck.model_validate_json(row["data"]) for row in rows.fetchall()]
 
     # --- lessons -------------------------------------------------------------
 

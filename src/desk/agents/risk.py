@@ -22,6 +22,7 @@ from desk.domain.models import (
     BearReason,
     DebateOutcome,
     Dossier,
+    ExitReason,
     Fact,
     Position,
     Rebuttal,
@@ -33,7 +34,7 @@ from desk.domain.rules import check_stop, daily_loss_breached, position_size_usd
 from desk.llm.client import LLMResult, StructuredLLM, debate_prompt
 from desk.portfolio import Portfolio
 from desk.ports import PriceFeed, QuoteSource
-from desk.storage.db import Store
+from desk.storage.db import PriceCheck, Store
 from desk.storage.debate_log import EventLog
 
 log = logging.getLogger(__name__)
@@ -139,7 +140,12 @@ class StopMonitor:
         self._sol_price_usd: float | None = None
 
     async def check_positions(self) -> list[Position]:
-        """One monitoring pass. Returns the positions closed during it."""
+        """One monitoring pass. Returns the positions closed during it.
+
+        Each position is priced from a live Jupiter sell quote, which reads the pool
+        itself; DexScreener's price can lag a fast dump. The feed is the fallback when
+        no quote comes back, and still supplies the SOL price.
+        """
         positions = self._store.open_positions()
         if not positions:
             return []
@@ -154,18 +160,31 @@ class StopMonitor:
         closed = []
         for position in positions:
             snapshot = snapshots.get(position.mint)
-            price = snapshot.price_usd if snapshot else await self._price_from_quote(position)
+            dex_price = snapshot.price_usd if snapshot else None
+            position, quote_price = await self._quote_price(position, dex_price)
+            price = quote_price if quote_price is not None else dex_price
             if price is None or self._sol_price_usd is None:
                 log.warning("risk: no price for %s this pass", position.symbol)
                 continue
-            result = await self._apply_price(position, price, self._sol_price_usd)
+            result = await self._apply_price(
+                position, price, self._sol_price_usd, quote_price=quote_price, dex_price=dex_price
+            )
             if not result.is_open:
                 closed.append(result)
         return closed
 
-    async def _apply_price(self, position: Position, price: float, sol_price: float) -> Position:
+    async def _apply_price(
+        self,
+        position: Position,
+        price: float,
+        sol_price: float,
+        *,
+        quote_price: float | None,
+        dex_price: float | None,
+    ) -> Position:
         check = check_stop(position, price, self._settings)
         updated = check.position.model_copy(update={"last_price_usd": price})
+        self._record(updated, price, quote_price, dex_price, check.exit_reason)
         if check.exit_reason is None:
             self._store.update_position(updated)
             return updated
@@ -184,10 +203,51 @@ class StopMonitor:
                 log.exception("risk: post-close hook failed for %s", closed.symbol)
         return closed
 
-    async def _price_from_quote(self, position: Position) -> float | None:
-        """Fallback when the price feed has no data: imply a price from a sell quote."""
+    async def _quote_price(
+        self, position: Position, dex_price: float | None
+    ) -> tuple[Position, float | None]:
+        """Price the position from a sell quote, on the same scale as its entry price.
+
+        A position opened without a reference quote takes one now, calibrated so this
+        first quote reads as the feed's current price.
+        """
         try:
             order = await self._jupiter.sell_quote(position.mint, position.token_amount_raw)
-        except DataError:
-            return None
-        return position.entry_price_usd * order.out_usd / position.cost_usd
+        except DataError as exc:
+            log.warning("risk: no sell quote for %s, using the feed: %s", position.symbol, exc)
+            return position, None
+        basis = position.quote_basis_usd
+        if basis is None:
+            if dex_price is None:
+                return position, None
+            basis = order.out_usd * position.entry_price_usd / dex_price
+            position = position.model_copy(update={"quote_basis_usd": basis})
+            self._store.update_position(position)
+            log.info("risk: calibrated the quote basis for %s", position.symbol)
+        return position, position.entry_price_usd * order.out_usd / basis
+
+    def _record(
+        self,
+        position: Position,
+        price: float,
+        quote_price: float | None,
+        dex_price: float | None,
+        exit_reason: ExitReason | None,
+    ) -> None:
+        if position.id is None:
+            return
+        self._store.record_price_check(
+            PriceCheck(
+                at=utcnow(),
+                position_id=position.id,
+                symbol=position.symbol,
+                source="quote" if quote_price is not None else "dex",
+                used_price_usd=price,
+                quote_price_usd=quote_price,
+                dex_price_usd=dex_price,
+                stop_price_usd=position.stop_price_usd,
+                high_water_price_usd=position.high_water_price_usd,
+                trailing_active=position.trailing_active,
+                exit_reason=exit_reason,
+            )
+        )

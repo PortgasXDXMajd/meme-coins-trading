@@ -116,7 +116,7 @@ async def build_desk(settings: Settings) -> AsyncGenerator[Desk]:
 
         broker = build_broker(settings, jupiter, rpc, store)
         portfolio = Portfolio(broker, store)
-        executor = Executor(broker, dex, portfolio, store, settings, events)
+        executor = Executor(broker, dex, portfolio, store, settings, events, quotes=jupiter)
         risk = RiskOfficer(llm, portfolio, store, settings)
         debate = Debate(
             Bear(llm, settings),
