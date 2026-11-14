@@ -13,19 +13,24 @@ from streamlit.testing.v1 import AppTest
 from desk.agents.analyst import Analyst
 from desk.agents.bear import Bear
 from desk.agents.risk import RiskOfficer
+from desk.dashboard.common import usd
 from desk.dashboard.data import (
+    is_missing_data,
     kill_rule_counts,
     latest_scout_pulse,
     load_snapshot,
     read_heartbeat,
     realised_equity_curve,
+    rejections_by_token,
+    stood_titles,
     tail_lines,
+    token_funnel,
 )
 from desk.debate import Debate
 from desk.domain.models import Position
 from desk.dossier import build_dossier
 from desk.portfolio import Portfolio
-from desk.storage.db import Store
+from desk.storage.db import EvaluationRecord, Store
 from tests.conftest import (
     NOW,
     CashOnlyBroker,
@@ -142,16 +147,91 @@ async def test_read_only_store_cannot_write(settings):
     store.close()
 
 
-async def test_dashboard_page_renders(settings, monkeypatch):
+def rejection(mint: str, minutes: int, *kills: str) -> EvaluationRecord:
+    at = NOW + timedelta(minutes=minutes)
+    return EvaluationRecord(
+        at=at,
+        mint=mint,
+        symbol=mint.upper(),
+        outcome="filtered",
+        detail={"kills": list(kills)},
+        cooldown_until=at + timedelta(minutes=30),
+    )
+
+
+def test_rejections_fold_into_one_row_per_token():
+    checks = [
+        rejection("a", 0, "liquidity_below_minimum: liquidity $9,000 < $40,000"),
+        rejection("b", 5, "data_unavailable: liquidity unknown"),
+        rejection("a", 30, "liquidity_below_minimum: liquidity $8,000 < $40,000"),
+        rejection("a", 60, "lp_not_burned: LP 61% < 99%"),
+    ]
+    first, second = rejections_by_token(checks)
+    assert (first.mint, first.checks) == ("a", 3)
+    assert first.rules == ("liquidity_below_minimum", "lp_not_burned")
+    assert first.latest_detail == "LP 61% < 99%"
+    assert first.first_at == NOW and first.last_at == NOW + timedelta(minutes=60)
+    assert second.missing_data_only and not first.missing_data_only
+
+
+def test_missing_data_means_nothing_but_missing_data():
+    assert is_missing_data(rejection("a", 0, "data_unavailable: liquidity unknown"))
+    assert not is_missing_data(
+        rejection("a", 0, "data_unavailable: x", "lp_not_burned: LP 1% < 99%")
+    )
+    assert not is_missing_data(rejection("a", 0))
+
+
+def test_usd_puts_the_sign_before_the_dollar():
+    assert usd(-0.93) == "-$0.93"
+    assert usd(0.5, signed=True) == "+$0.50"
+    assert usd(335_000) == "$335k"
+    assert usd(None) == "–"
+
+
+async def test_funnel_and_veto_titles(settings):
     await seed_desk(settings)
+    snapshot = load_snapshot(settings, SINCE, NOW)
+    assert snapshot is not None
+    funnel = token_funnel(snapshot)
+    assert (funnel.checked, funnel.rejected, funnel.debated, funnel.approved) == (3, 1, 1, 0)
+    assert funnel.bought == 1
+
+    store = Store(settings.db_path, read_only=True)
+    outcome = store.debate_outcome(snapshot.debates[0].id)
+    store.close()
+    assert outcome is not None
+    assert stood_titles(outcome) == ["Risk 2"]
+
+
+def open_dashboard(settings, monkeypatch) -> AppTest:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setenv("DATA_DIR", str(settings.data_dir))
     monkeypatch.setenv("LOG_DIR", str(settings.log_dir))
+    return AppTest.from_file(str(APP), default_timeout=30).run()
 
-    page = AppTest.from_file(str(APP), default_timeout=30).run()
+
+async def test_overview_page_renders(settings, monkeypatch):
+    await seed_desk(settings)
+    page = open_dashboard(settings, monkeypatch)
 
     assert not page.exception
     labels = {metric.label: metric.value for metric in page.metric}
     assert labels["Equity"] == "$251.00"
-    assert labels["3 · Bear vs Analyst: debated"] == "1"
+    assert labels["2 · Debated"] == "1"
+
+
+async def test_debates_page_shows_the_veto(settings, monkeypatch):
+    await seed_desk(settings)
+    page = open_dashboard(settings, monkeypatch).switch_page("views/debates.py").run()
+
+    assert not page.exception
     assert any("vetoed" in error.value for error in page.error)
+    assert any("Risk 2" in expander.label for expander in page.expander)
+
+
+@pytest.mark.parametrize("view", ["views/rejections.py", "views/trades.py", "views/activity.py"])
+async def test_every_page_renders(settings, monkeypatch, view):
+    await seed_desk(settings)
+    page = open_dashboard(settings, monkeypatch).switch_page(view).run()
+    assert not page.exception
