@@ -1,5 +1,5 @@
 """The desk's assembly line. This is the only place agents are called, and always in
-the same order: Scout -> Filter -> Bear -> Analyst -> Risk -> Executor.
+the same order: Scout -> momentum trigger -> Filter -> Bear -> Analyst -> Risk -> Executor.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from desk.domain.models import (
     Position,
     utcnow,
 )
-from desk.domain.rules import LIQUIDITY_UNKNOWN
+from desk.domain.rules import LIQUIDITY_UNKNOWN, momentum_signal
 from desk.dossier import build_dossier
 from desk.ports import TokenFilter, TokenScout
 from desk.storage.db import Store
@@ -56,9 +56,7 @@ class Pipeline:
         """One discovery pass. Returns positions opened. `debate=False` stops after Filter."""
         opened: list[Position] = []
         held = {p.mint for p in self._store.open_positions()}
-        for candidate in await self._scout.scan():
-            if candidate.mint in held or self._store.on_cooldown(candidate.mint, self._clock()):
-                continue
+        for candidate in self._moving(await self._scout.scan(), held):
             verdict = await self._filter.evaluate(candidate)
             if not verdict.passed:
                 self._record_kill(verdict)
@@ -80,6 +78,37 @@ class Pipeline:
                 opened.append(position)
                 held.add(position.mint)
         return opened
+
+    def _moving(self, in_window: list[Candidate], held: set[str]) -> list[Candidate]:
+        """The tokens breaking out right now, strongest volume surge first.
+
+        A token that is not moving costs nothing and is not put on cooldown: it is
+        simply looked at again on the next scan.
+        """
+        now = self._clock()
+        triggered = []
+        for candidate in in_window:
+            if candidate.mint in held or self._store.on_cooldown(candidate.mint, now):
+                continue
+            signal = momentum_signal(candidate, self._settings, now)
+            if signal.triggered:
+                triggered.append((signal, candidate))
+        triggered.sort(key=lambda pair: pair[0].volume_surge or 0, reverse=True)
+        for signal, candidate in triggered:
+            log.info("momentum: %s TRIGGERED: %s", candidate.symbol, signal.describe(candidate))
+            self._events.emit(
+                "momentum_trigger",
+                symbol=candidate.symbol,
+                mint=candidate.mint,
+                price_usd=candidate.price_usd,
+                volume_surge=signal.volume_surge,
+                buy_share_pct=signal.buy_share_pct,
+                trailing_buy_share_pct=signal.trailing_buy_share_pct,
+                price_change_m5_pct=candidate.price_change_pct.m5,
+                price_change_h1_pct=candidate.price_change_pct.h1,
+                volume_m5_usd=candidate.volume_usd.m5,
+            )
+        return [candidate for _, candidate in triggered]
 
     async def _debate_and_trade(self, verdict: FilterVerdict) -> Position | None:
         candidate = verdict.candidate

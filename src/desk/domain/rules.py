@@ -30,6 +30,92 @@ def in_scout_window(candidate: Candidate, settings: Settings, now: datetime) -> 
 
 
 # --------------------------------------------------------------------------
+# Momentum trigger. Unknown data never triggers (fail closed).
+# --------------------------------------------------------------------------
+
+TRAILING_MINUTES = 55.0  # the hour before the last 5 minutes
+WINDOW_MINUTES = 5.0
+
+
+@dataclass(frozen=True)
+class MomentumSignal:
+    """How the last 5 minutes compare with the token's own trailing hour."""
+
+    triggered: bool
+    volume_surge: float | None  # 5m volume / average 5m volume of the trailing hour
+    buy_share_pct: float | None  # share of 5m trades that were buys
+    trailing_buy_share_pct: float | None  # the same share over the trailing hour
+    misses: tuple[str, ...] = ()  # why it did not trigger
+
+    def describe(self, candidate: Candidate) -> str:
+        def number(value: float | None, pattern: str) -> str:
+            return "unknown" if value is None else pattern.format(value)
+
+        return (
+            f"5m volume ${candidate.volume_usd.m5 or 0:,.0f} is "
+            f"{number(self.volume_surge, '{:.1f}x')} its trailing-hour 5-minute average; "
+            f"5m buy share {number(self.buy_share_pct, '{:.0f}%')} vs "
+            f"{number(self.trailing_buy_share_pct, '{:.0f}%')} over the trailing hour; "
+            f"price {number(candidate.price_change_pct.m5, '{:+.1f}%')} in 5m, "
+            f"{number(candidate.price_change_pct.h1, '{:+.1f}%')} in 1h"
+        )
+
+
+def _buy_share_pct(buys: int, sells: int) -> float | None:
+    total = buys + sells
+    return 100 * buys / total if total > 0 else None
+
+
+def momentum_signal(candidate: Candidate, settings: Settings, now: datetime) -> MomentumSignal:
+    """Is this token breaking out right now, measured against its own trailing hour?
+
+    DexScreener's 1h figures include the last 5 minutes, so the baseline is the hour
+    minus those 5 minutes. A pair younger than an hour has a shorter baseline.
+    """
+    misses: list[str] = []
+    volume_m5 = candidate.volume_usd.m5 or 0.0
+    change_m5 = candidate.price_change_pct.m5
+    change_h1 = candidate.price_change_pct.h1
+    m5, h1 = candidate.txns_m5, candidate.txns_h1
+
+    if change_m5 is None or change_m5 < settings.momentum_min_price_change_m5_pct:
+        misses.append("5m price change below the minimum")
+    elif change_m5 > settings.momentum_max_price_change_m5_pct:
+        misses.append("5m price change is a vertical candle")
+    if change_h1 is None or change_h1 < settings.momentum_min_price_change_h1_pct:
+        misses.append("1h price change below the minimum")
+    if volume_m5 < settings.momentum_min_volume_m5_usd:
+        misses.append("5m volume too small")
+    if m5.buys + m5.sells < settings.momentum_min_txns_m5:
+        misses.append("too few 5m trades")
+
+    trailing_minutes = min(TRAILING_MINUTES, candidate.age_hours(now) * 60 - WINDOW_MINUTES)
+    earlier_volume = max(0.0, (candidate.volume_usd.h1 or 0.0) - volume_m5)
+    surge = None
+    if trailing_minutes >= WINDOW_MINUTES and earlier_volume > 0:
+        surge = volume_m5 / (earlier_volume * WINDOW_MINUTES / trailing_minutes)
+    if surge is None:
+        misses.append("no trailing-hour volume to compare with")
+    elif surge < settings.momentum_volume_surge_multiple:
+        misses.append("5m volume is not above the trailing hour")
+
+    buy_share = _buy_share_pct(m5.buys, m5.sells)
+    trailing_share = _buy_share_pct(max(0, h1.buys - m5.buys), max(0, h1.sells - m5.sells))
+    if buy_share is None or buy_share < settings.momentum_min_buy_share_pct:
+        misses.append("5m buy share below the minimum")
+    elif trailing_share is not None and buy_share < trailing_share:
+        misses.append("5m buy share is below the trailing hour")
+
+    return MomentumSignal(
+        triggered=not misses,
+        volume_surge=surge,
+        buy_share_pct=buy_share,
+        trailing_buy_share_pct=trailing_share,
+        misses=tuple(misses),
+    )
+
+
+# --------------------------------------------------------------------------
 # Filter kills. Unknown data is always a kill (fail closed).
 # --------------------------------------------------------------------------
 

@@ -35,6 +35,12 @@ class CandleSource(Protocol):
         ...
 
 
+class MintFeed(Protocol):
+    """A source of token mints worth watching. Best effort: a failed feed returns less."""
+
+    async def discover_mints(self) -> set[str]: ...
+
+
 class TokenScout(Protocol):
     async def scan(self) -> list[Candidate]: ...
 

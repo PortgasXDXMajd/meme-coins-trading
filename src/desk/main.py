@@ -1,6 +1,6 @@
 """Entry point: wires the desk together and runs it.
 
-desk run                 run until stopped (discovery loop + risk loop)
+desk run                 run until stopped (feeds loop + discovery loop + risk loop)
 desk once [--no-debate]  one discovery pass, then exit
 desk report [--ai]       summary of the last N hours
 desk ui                  read-only Streamlit dashboard
@@ -35,7 +35,7 @@ from desk.config import Settings
 from desk.data.dexscreener import DexScreener
 from desk.data.geckoterminal import GeckoTerminal
 from desk.data.http import DataError
-from desk.data.jupiter import Jupiter
+from desk.data.jupiter import Jupiter, JupiterActiveTokens
 from desk.data.rugcheck import RugCheck
 from desk.data.solana_rpc import SolanaRpc, rpc_url
 from desk.debate import Debate
@@ -59,6 +59,7 @@ class Desk:
     settings: Settings
     store: Store
     llm: ClaudeLLM
+    scout: Scout
     pipeline: Pipeline
     monitor: StopMonitor
 
@@ -137,8 +138,12 @@ async def build_desk(settings: Settings) -> AsyncGenerator[Desk]:
             lessons=lambda: store.recent_lessons(settings.lessons_in_prompt),
             max_unrebutted=settings.max_unrebutted_reasons,
         )
+        active = JupiterActiveTokens(
+            jupiter, settings.max_pair_age_hours, settings.max_market_cap_usd
+        )
+        scout = Scout(dex, [dex, gecko, active], settings, store=store)
         pipeline = Pipeline(
-            Scout(dex, gecko, settings),
+            scout,
             Filter(rugcheck, jupiter, settings),
             debate,
             risk,
@@ -157,7 +162,7 @@ async def build_desk(settings: Settings) -> AsyncGenerator[Desk]:
             on_close=PostMortem(llm, store).review,
         )
         try:
-            yield Desk(settings, store, llm, pipeline, monitor)
+            yield Desk(settings, store, llm, scout, pipeline, monitor)
         finally:
             store.close()
 
@@ -190,9 +195,11 @@ async def run_forever(settings: Settings) -> None:
             settings.bear_model,
             open_count,
         )
-        # Risk runs on its own loop so a slow debate can never delay a stop.
+        # Risk runs on its own loop so a slow debate can never delay a stop. The feeds
+        # run on theirs so the watchlist is re-priced often without waiting for them.
         await asyncio.gather(
             _loop("risk", settings.risk_interval_seconds, desk.monitor.check_positions, stop),
+            _loop("feeds", settings.discovery_interval_seconds, desk.scout.discover, stop),
             _loop("discovery", settings.scout_interval_seconds, desk.pipeline.run_cycle, stop),
         )
         log.info("desk stopped; %d position(s) left open", len(desk.store.open_positions()))
@@ -201,6 +208,7 @@ async def run_forever(settings: Settings) -> None:
 async def run_once(settings: Settings, *, debate: bool) -> None:
     async with build_desk(settings) as desk:
         await desk.monitor.check_positions()
+        await desk.scout.discover()
         opened = await desk.pipeline.run_cycle(debate=debate)
         log.info("single pass done: %d position(s) opened", len(opened))
 
@@ -239,7 +247,7 @@ def cli() -> None:
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("run", help="run until stopped")
     once = commands.add_parser("once", help="one discovery pass")
-    once.add_argument("--no-debate", action="store_true", help="stop after Scout and Filter")
+    once.add_argument("--no-debate", action="store_true", help="stop after the Filter")
     report = commands.add_parser("report", help="summarise recent activity")
     report.add_argument("--hours", type=float, default=24)
     report.add_argument("--ai", action="store_true", help="add a Claude-written report")

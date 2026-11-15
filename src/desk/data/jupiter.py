@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -12,6 +14,8 @@ from desk.data.http import DataError, RateLimiter, request_json
 from desk.domain.models import RoundTrip
 
 BASE_URL = "https://api.jup.ag/swap/v2"
+TOKENS_URL = "https://api.jup.ag/tokens/v2"
+ACTIVE_TOKEN_PATHS = ("/toporganicscore/5m?limit=100", "/toptraded/5m?limit=100")
 LAMPORTS_PER_SOL = 1_000_000_000
 KEYLESS_INTERVAL_SECONDS = 2.1  # 0.5 requests/second without a key
 KEYED_INTERVAL_SECONDS = 1.05  # 1 request/second on the free key
@@ -126,6 +130,17 @@ class Jupiter:
             sell_price_impact_pct=sell.price_impact_pct,
         )
 
+    async def token_list(self, path: str) -> list[dict[str, Any]]:
+        """One of the Tokens API lists, e.g. the most traded tokens of the last 5 minutes."""
+        raw = await request_json(
+            self._client,
+            "GET",
+            TOKENS_URL + path,
+            limiter=self._limiter,
+            headers=self._headers,
+        )
+        return raw if isinstance(raw, list) else []
+
     async def execute(self, signed_transaction_b64: str, request_id: str) -> Execution:
         raw = await request_json(
             self._client,
@@ -145,6 +160,57 @@ class Jupiter:
             total_input_amount=int(raw["totalInputAmount"]),
             total_output_amount=int(raw["totalOutputAmount"]),
         )
+
+
+def young_token_mints(
+    tokens: list[dict[str, Any]], now: datetime, max_age_hours: float, max_market_cap_usd: float
+) -> set[str]:
+    """Mints from a Jupiter token list that could still enter the desk's window.
+
+    The lists are mostly established tokens; only ones whose first pool is recent and
+    whose market cap is not already too large are worth watching.
+    """
+    mints: set[str] = set()
+    for token in tokens:
+        try:
+            created = datetime.fromisoformat(token["firstPool"]["createdAt"].replace("Z", "+00:00"))
+            age_hours = (now - created).total_seconds() / 3600
+            if age_hours <= max_age_hours and float(token.get("mcap") or 0) <= max_market_cap_usd:
+                mints.add(token["id"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return mints
+
+
+class JupiterActiveTokens:
+    """Discovery feed: young tokens among Jupiter's most active of the last 5 minutes.
+
+    Shares Jupiter's rate limit as a normal caller, so stop quotes still go first.
+    """
+
+    def __init__(
+        self,
+        jupiter: Jupiter,
+        max_age_hours: float,
+        max_market_cap_usd: float,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._jupiter = jupiter
+        self._max_age_hours = max_age_hours
+        self._max_market_cap_usd = max_market_cap_usd
+        self._clock = clock
+
+    async def discover_mints(self) -> set[str]:
+        mints: set[str] = set()
+        for path in ACTIVE_TOKEN_PATHS:
+            try:
+                tokens = await self._jupiter.token_list(path)
+            except DataError:
+                continue
+            mints |= young_token_mints(
+                tokens, self._clock(), self._max_age_hours, self._max_market_cap_usd
+            )
+        return mints
 
 
 class UrgentQuotes:

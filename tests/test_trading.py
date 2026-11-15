@@ -441,3 +441,38 @@ async def test_other_filter_kills_cool_down_for_thirty_minutes(settings, store):
     await desk.pipeline.run_cycle()
     assert store.on_cooldown(desk.candidate.mint, NOW + timedelta(minutes=29))
     assert not store.on_cooldown(desk.candidate.mint, NOW + timedelta(minutes=31))
+
+
+# --- Momentum trigger ----------------------------------------------------------
+
+
+async def test_a_token_that_is_not_moving_never_reaches_the_filter(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    flat = make_candidate(price_change_pct={"m5": 0.4, "h1": 15.0})
+    desk.pipeline._scout = FakeScout([flat])
+
+    assert await desk.pipeline.run_cycle() == []
+    assert desk.filter.seen == []
+    assert desk.llm.calls == []
+    # No cooldown: it is looked at again on the next scan, when it may be moving.
+    assert not store.on_cooldown(desk.candidate.mint, NOW)
+
+
+async def test_the_strongest_volume_surge_is_evaluated_first(settings, store):
+    desk = Desk(settings, store, winning_llm(), kill=True)
+    mild = make_candidate(mint="Mild", symbol="MILD", volume_usd={"m5": 6_000, "h1": 30_000})
+    strong = make_candidate(mint="Strong", symbol="STRONG", volume_usd={"m5": 20_000, "h1": 30_000})
+    flat = make_candidate(mint="Flat", symbol="FLAT", volume_usd={"m5": 3_000, "h1": 30_000})
+    desk.pipeline._scout = FakeScout([mild, flat, strong])
+
+    await desk.pipeline.run_cycle()
+    assert desk.filter.seen == ["STRONG", "MILD"]
+
+
+async def test_the_dossier_ends_with_the_momentum_numbers(settings):
+    from desk.dossier import build_dossier
+
+    facts = build_dossier(make_verdict(), settings, NOW).facts
+    assert facts[-1].category == "momentum"
+    assert "4.0x its trailing-hour" in facts[-1].statement
+    assert facts[0].id == "F1" and facts[0].category == "market"

@@ -13,6 +13,7 @@ from desk.domain.rules import (
     in_scout_window,
     initial_stop_price,
     liquidity_kills,
+    momentum_signal,
     position_size_usd,
     round_trip_kills,
     safety_kills,
@@ -240,3 +241,48 @@ def test_take_profit_fires_once_at_plus_eighteen(settings):
 
 def test_value_counts_only_what_is_still_held(settings):
     assert open_position(open_fraction=0.5).value_at(2.0) == pytest.approx(20.0)
+
+
+# --- Momentum trigger --------------------------------------------------------
+
+
+def test_a_breakout_against_the_trailing_hour_triggers(settings):
+    signal = momentum_signal(make_candidate(), settings, NOW)
+    assert signal.triggered
+    assert signal.misses == ()
+    # $8k in 5m against ($30k - $8k) spread over the 11 earlier 5-minute windows.
+    assert signal.volume_surge == pytest.approx(4.0)
+    assert signal.buy_share_pct == pytest.approx(100 * 60 / 90)
+    assert signal.trailing_buy_share_pct == pytest.approx(100 * 240 / 460)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "miss"),
+    [
+        ({"price_change_pct": {"m5": 2.9, "h1": 20}}, "5m price change below the minimum"),
+        ({"price_change_pct": {"m5": 41, "h1": 20}}, "5m price change is a vertical candle"),
+        ({"price_change_pct": {"m5": 6, "h1": -1}}, "1h price change below the minimum"),
+        ({"price_change_pct": {}}, "5m price change below the minimum"),  # unknown: fail closed
+        ({"volume_usd": {"m5": 2_999, "h1": 4_000}}, "5m volume too small"),
+        ({"txns_m5": {"buys": 12, "sells": 7}}, "too few 5m trades"),
+        ({"volume_usd": {"m5": 8_000, "h1": 60_000}}, "5m volume is not above the trailing hour"),
+        ({"volume_usd": {"m5": 8_000, "h1": 8_000}}, "no trailing-hour volume to compare with"),
+        ({"txns_m5": {"buys": 48, "sells": 42}}, "5m buy share below the minimum"),
+        ({"txns_h1": {"buys": 500, "sells": 100}}, "5m buy share is below the trailing hour"),
+    ],
+)
+def test_momentum_misses(settings, overrides, miss):
+    signal = momentum_signal(make_candidate(**overrides), settings, NOW)
+    assert not signal.triggered
+    assert miss in signal.misses
+
+
+def test_a_young_pair_is_compared_with_the_minutes_it_has_traded(settings):
+    # 35 minutes old: the baseline is 30 minutes (6 windows), not 55.
+    young = make_candidate(pair_created_at=NOW - timedelta(minutes=35))
+    assert momentum_signal(young, settings, NOW).volume_surge == pytest.approx(8_000 / (22_000 / 6))
+
+
+def test_momentum_thresholds_come_from_settings(settings):
+    strict = settings.model_copy(update={"momentum_volume_surge_multiple": 5.0})
+    assert not momentum_signal(make_candidate(), strict, NOW).triggered

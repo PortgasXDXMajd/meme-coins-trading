@@ -30,7 +30,18 @@ class Settings(BaseSettings):
     max_pair_age_hours: float = 72
     min_market_cap_usd: float = 300_000
     max_market_cap_usd: float = 20_000_000
-    watchlist_max_size: int = 300
+    watchlist_max_size: int = 600
+
+    # --- momentum trigger --------------------------------------------------
+    # A token in the window is only worth the Filter and a debate while it is breaking
+    # out against its own trailing hour: the last 5 minutes compared with the 55 before.
+    momentum_min_price_change_m5_pct: float = 3
+    momentum_max_price_change_m5_pct: float = 40  # a vertical candle, or a bad print
+    momentum_min_price_change_h1_pct: float = 0  # not a bounce inside a falling hour
+    momentum_min_volume_m5_usd: float = Field(default=3_000, ge=0)
+    momentum_min_txns_m5: int = Field(default=20, ge=0)
+    momentum_volume_surge_multiple: float = Field(default=2.0, gt=0)
+    momentum_min_buy_share_pct: float = Field(default=55, ge=0, le=100)
 
     # --- filter ------------------------------------------------------------
     min_liquidity_usd: float = 40_000
@@ -63,7 +74,10 @@ class Settings(BaseSettings):
     daily_loss_halt_pct: float = Field(default=20, gt=0)
 
     # --- cadence -----------------------------------------------------------
-    scout_interval_seconds: float = 60
+    # The watchlist is re-priced every `scout_interval_seconds` so a breakout is seen
+    # quickly; the slower discovery feeds only add tokens to it.
+    scout_interval_seconds: float = 20
+    discovery_interval_seconds: float = 60
     risk_interval_seconds: float = 5
     filter_cooldown_minutes: float = 30
     no_liquidity_cooldown_hours: float = 6  # DexScreener reports no pool liquidity

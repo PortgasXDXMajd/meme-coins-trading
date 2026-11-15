@@ -132,10 +132,17 @@ class Store:
         return None if row is None else float(row["value"])
 
     def set_float(self, key: str, value: float) -> None:
+        self.set_text(key, repr(value))
+
+    def get_text(self, key: str) -> str | None:
+        row = self._db.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_text(self, key: str, value: str) -> None:
         self._db.execute(
             "INSERT INTO kv (key, value) VALUES (?, ?) "
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            (key, repr(value)),
+            (key, value),
         )
 
     # --- evaluations and cooldowns -------------------------------------------

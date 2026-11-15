@@ -8,7 +8,8 @@ It runs in **paper mode** by default: live market data and live Jupiter quotes, 
 
 | Agent | How | What it does |
 |---|---|---|
-| Scout | code | Finds pairs 30 min – 72 h old with a $300k – $20M market cap |
+| Scout | code | Keeps a watchlist of up to 600 young tokens from DexScreener, GeckoTerminal (5-minute, 1-hour and 24-hour trending, new pools) and Jupiter's most active tokens, and re-prices it every 20 s. Reports pairs 30 min – 72 h old with a $300k – $20M market cap |
+| Momentum trigger | code | Lets a token through only while it is breaking out against its own trailing hour: price up 3–40% in 5 minutes inside a rising hour, 5-minute volume at least 2× its trailing-hour average, at least 55% of 5-minute trades being buys and no fewer than in the hour before. A token that is not moving costs nothing and is checked again on the next scan |
 | Filter | code | Kills on: mint or freeze authority not revoked, LP not burned, liquidity < $40k, top 10 > 25%, dev > 3%, transfer fee, dangerous token extensions, no sell route. Missing data is a kill |
 | Bear | Claude (Sonnet) | Up to three concrete reasons this entry loses money in the next hour, each citing dossier facts. Can inspect wallets, quote large exits and refresh the market |
 | Analyst | Claude | Rebuts each reason with cited data, or concedes |
@@ -37,7 +38,7 @@ nohup scripts/run_overnight.sh >/dev/null 2>&1 &   # keeps the Mac awake, restar
 tail -f logs/overnight.out                         # watch
 pkill -TERM -f "desk run"                          # stop cleanly
 uv run desk report --ai                            # summary
-uv run desk once --no-debate                       # one Scout + Filter pass, no Claude calls
+uv run desk once --no-debate                       # one Scout + trigger + Filter pass, no Claude calls
 ```
 
 Run the desk either in Docker or natively, not both at once: they share `data/desk.db`.
@@ -56,12 +57,12 @@ To stop new entries without stopping the desk, create `data/HALT`. Open position
 
 - `logs/debates/<date>/<time>-<symbol>-<mint>.md` — the full debate for every token that passed the Filter: dossier, the Bear's reasons, rebuttals, rulings, evidence gathered.
 - `logs/desk.log` — everything the desk did, in order.
-- `logs/events.jsonl` — the same as structured records (kills, debates, buys, sells).
-- `data/desk.db` — SQLite: positions, debates, lessons, paper cash, and `price_checks` (every stop-monitor pass: the Jupiter quote price, the DexScreener price, which one was used, the stop and the high).
+- `logs/events.jsonl` — the same as structured records (momentum triggers, kills, debates, buys, sells).
+- `data/desk.db` — SQLite: positions, debates, lessons, paper cash, the Scout's watchlist (kept across restarts), and `price_checks` (every stop-monitor pass: the Jupiter quote price, the DexScreener price, which one was used, the stop and the high).
 
 ## Settings
 
-Every threshold is in `src/desk/config.py` and can be overridden in `.env` (see `.env.example`). Defaults: stop at 2.5× the token's average one-minute range, between −6% and −12% (−12% when no candles are available); sell half at +18% and move the stop to break-even; trail arms at +12% and follows the high by the entry stop's distance (at least 6%); 8% per trade; 5 open positions; new entries halt after a 20% daily loss; 20 debates per hour; a debate approves with at most 1 reason standing (`MAX_UNREBUTTED_REASONS`). Tokens DexScreener reports no liquidity for are skipped for 6 hours.
+Every threshold is in `src/desk/config.py` and can be overridden in `.env` (see `.env.example`). Defaults: the momentum trigger above (`MOMENTUM_*`); stop at 2.5× the token's average one-minute range, between −6% and −12% (−12% when no candles are available); sell half at +18% and move the stop to break-even; trail arms at +12% and follows the high by the entry stop's distance (at least 6%); 8% per trade; 5 open positions; new entries halt after a 20% daily loss; 20 debates per hour; a debate approves with at most 1 reason standing (`MAX_UNREBUTTED_REASONS`). Tokens DexScreener reports no liquidity for are skipped for 6 hours.
 
 Optional free keys that help: `JUPITER_API_KEY` (doubles the quote rate limit) and `HELIUS_API_KEY` (faster RPC for wallet lookups).
 

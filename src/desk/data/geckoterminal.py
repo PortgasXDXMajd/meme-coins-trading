@@ -9,7 +9,16 @@ import httpx
 from desk.data.http import DataError, RateLimiter, request_json
 
 BASE_URL = "https://api.geckoterminal.com/api/v2/networks/solana"
-DISCOVERY_PATHS = ("/trending_pools?page=1", "/trending_pools?page=2", "/new_pools?page=1")
+# The short trending windows surface a pool while it is moving; the default 24-hour
+# list mostly shows moves that are already over. Five calls a minute stays well
+# inside the free tier.
+DISCOVERY_PATHS = (
+    "/trending_pools?page=1&duration=5m",
+    "/trending_pools?page=1&duration=1h",
+    "/trending_pools?page=1",
+    "/new_pools?page=1",
+    "/new_pools?page=2",
+)
 TOKEN_ID_PREFIX = "solana_"
 
 

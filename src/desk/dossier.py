@@ -15,6 +15,7 @@ from desk.domain.models import (
     TxnCounts,
     utcnow,
 )
+from desk.domain.rules import momentum_signal
 
 HOLDERS_LISTED = 10
 
@@ -152,10 +153,14 @@ def build_dossier(
 ) -> Dossier:
     if not verdict.passed or verdict.safety is None or verdict.round_trip is None:
         raise ValueError("a dossier is only built for candidates that passed the Filter")
+    now = now or utcnow()
+    signal = momentum_signal(verdict.candidate, settings, now)
     entries = (
-        _market_facts(verdict.candidate, now or utcnow())
+        _market_facts(verdict.candidate, now)
         + _safety_facts(verdict.safety, settings)
         + _execution_facts(verdict.round_trip)
+        # Last, so the numbering of the facts above never depends on it.
+        + [("momentum", f"Why the desk is looking now: {signal.describe(verdict.candidate)}.")]
     )
     facts = tuple(
         Fact(id=f"F{number}", category=category, statement=statement)

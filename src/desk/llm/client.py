@@ -89,6 +89,9 @@ def debate_prompt(role: str, settings: Settings) -> str:
         take_profit_pct=settings.take_profit_pct,
         trail_activation_pct=settings.trail_activation_pct,
         trail_distance_pct=settings.trail_distance_pct,
+        momentum_min_change=settings.momentum_min_price_change_m5_pct,
+        momentum_surge=settings.momentum_volume_surge_multiple,
+        momentum_buy_share=settings.momentum_min_buy_share_pct,
     )
     return f"{load_prompt(role)}\n{baseline}"
 

@@ -85,6 +85,11 @@ def make_candidate(**overrides: Any) -> Candidate:
         "sol_price_usd": 80.0,
         "market_cap_usd": 1_000_000,
         "liquidity_usd": 60_000,
+        # Breaking out: 5m volume is 4x its trailing-hour average, 67% of 5m trades are buys.
+        "volume_usd": {"m5": 8_000, "h1": 30_000},
+        "price_change_pct": {"m5": 6.0, "h1": 20.0},
+        "txns_m5": {"buys": 60, "sells": 30},
+        "txns_h1": {"buys": 300, "sells": 250},
         "observed_at": NOW,
     }
     return Candidate(**(defaults | overrides))
