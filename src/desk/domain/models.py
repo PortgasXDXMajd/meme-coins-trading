@@ -1,8 +1,8 @@
 """Handoff contracts between agents.
 
 Each agent accepts only the previous agent's output type. The models are frozen,
-and `TradeApproval` cannot be constructed without a fully rebutted debate, so an
-unapproved buy is not representable.
+and `TradeApproval` cannot be constructed without a won debate, so an unapproved
+buy is not representable.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-REQUIRED_BEAR_REASONS = 3
+MAX_BEAR_REASONS = 3
 
 
 def utcnow() -> datetime:
@@ -190,7 +190,8 @@ class BearReason(BaseModel):
 
 class BearCase(BaseModel):
     reasons: list[BearReason] = Field(
-        description="Exactly three distinct reasons, strongest first."
+        description="One to three distinct reasons, strongest first. Give fewer than "
+        "three when fewer real reasons exist."
     )
 
 
@@ -243,14 +244,21 @@ class DebateOutcome(Frozen):
     usage: LLMUsage = LLMUsage()
     started_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime = Field(default_factory=utcnow)
+    # How many reasons could stand without vetoing. Debates saved before this field
+    # existed load with 0, which is the old all-three-rebutted rule.
+    max_unrebutted: int = 0
+
+    @property
+    def unrebutted(self) -> tuple[Ruling, ...]:
+        return tuple(r for r in self.rulings if r.verdict is RulingVerdict.UNREBUTTED)
 
     @property
     def approved(self) -> bool:
         return (
             not self.veto_reasons
-            and len(self.reasons) == REQUIRED_BEAR_REASONS
-            and len(self.rulings) == REQUIRED_BEAR_REASONS
-            and all(r.verdict is RulingVerdict.REBUTTED for r in self.rulings)
+            and 1 <= len(self.reasons) <= MAX_BEAR_REASONS
+            and len(self.rulings) == len(self.reasons)
+            and len(self.unrebutted) <= self.max_unrebutted
         )
 
 
@@ -260,7 +268,7 @@ class DebateOutcome(Frozen):
 
 
 class TradeApproval(Frozen):
-    """Risk's sign-off. Only a fully rebutted debate can produce one."""
+    """Risk's sign-off. Only a won debate can produce one."""
 
     outcome: DebateOutcome
     stop_loss_pct: float = Field(gt=0, lt=100)
@@ -270,7 +278,7 @@ class TradeApproval(Frozen):
     @model_validator(mode="after")
     def _debate_must_be_won(self) -> TradeApproval:
         if not self.outcome.approved:
-            raise ValueError("TradeApproval requires all three Bear reasons to be rebutted")
+            raise ValueError("TradeApproval requires a won debate")
         return self
 
     @property
@@ -291,6 +299,7 @@ class Fill(Frozen):
 class ExitReason(StrEnum):
     STOP_LOSS = "stop_loss"
     TRAILING_STOP = "trailing_stop"
+    TAKE_PROFIT = "take_profit"  # partial exit; the position stays open
     MANUAL = "manual"
 
 
@@ -299,9 +308,12 @@ class Position(Frozen):
     mint: str
     symbol: str
     pair_address: str
-    token_amount_raw: int
-    cost_usd: float
+    token_amount_raw: int  # tokens still held
+    cost_usd: float  # what the whole position cost, including any part already sold
     entry_price_usd: float  # market price when the buy filled; stops key off this
+    # Stop distance chosen at entry from the token's volatility; the trail uses it too.
+    # None for positions opened before volatility stops existed.
+    stop_pct: float | None = None
     # What a sell quote paid for the whole position right after entry. Later quotes
     # are scaled against it, so a live quote reads as a price on the entry's scale.
     quote_basis_usd: float | None = None
@@ -315,6 +327,11 @@ class Position(Frozen):
     exit_price_usd: float | None = None
     exit_reason: ExitReason | None = None
     debate_id: int | None = None
+    # Partial take-profit: share of the original position still held, and the USD
+    # already received for the part sold. `proceeds_usd` on close includes it.
+    open_fraction: float = 1.0
+    realized_usd: float = 0.0
+    took_profit: bool = False
 
     @property
     def is_open(self) -> bool:
@@ -330,5 +347,5 @@ class Position(Frozen):
         return None if pnl is None else 100 * pnl / self.cost_usd
 
     def value_at(self, price_usd: float) -> float:
-        """Mark-to-market value, scaled from the entry price (decimals-agnostic)."""
-        return self.cost_usd * price_usd / self.entry_price_usd
+        """Mark-to-market value of what is still held, scaled from the entry price."""
+        return self.cost_usd * self.open_fraction * price_usd / self.entry_price_usd

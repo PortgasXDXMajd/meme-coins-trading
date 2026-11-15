@@ -1,4 +1,4 @@
-"""Bear: the devil's advocate. Three concrete on-chain reasons not to buy."""
+"""Bear: the devil's advocate. Up to three concrete reasons not to buy now."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class Bear:
             f"<dossier>\n{dossier.render()}\n</dossier>\n\n"
             f"<evidence>\n{ledger.render()}\n</evidence>\n\n"
             f"<desk_lessons>\n{lesson_text}\n</desk_lessons>\n\n"
-            "Give your three reasons not to buy this token now."
+            "Give up to three reasons not to buy this token now, fewer if fewer are real."
         )
         return await self._llm.ask(
             system=self._system, user=user, output_type=BearCase, tools=tools

@@ -1,4 +1,4 @@
-"""GeckoTerminal: trending and newly created Solana pools, used only for discovery."""
+"""GeckoTerminal: trending and new Solana pools for discovery, and one-minute candles."""
 
 from __future__ import annotations
 
@@ -16,12 +16,24 @@ TOKEN_ID_PREFIX = "solana_"
 def base_token_mints(payload: dict[str, Any]) -> set[str]:
     mints: set[str] = set()
     for pool in payload.get("data") or []:
-        token_id = (
-            pool.get("relationships", {}).get("base_token", {}).get("data", {}).get("id", "")
-        )
+        token_id = pool.get("relationships", {}).get("base_token", {}).get("data", {}).get("id", "")
         if token_id.startswith(TOKEN_ID_PREFIX):
             mints.add(token_id.removeprefix(TOKEN_ID_PREFIX))
     return mints
+
+
+def candle_ranges_pct(payload: dict[str, Any]) -> list[float]:
+    """(high - low) / open per candle, in %, from an OHLCV response."""
+    rows = ((payload.get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
+    ranges = []
+    for row in rows:
+        try:
+            _, open_, high, low = (float(v) for v in row[:4])
+        except (TypeError, ValueError):
+            continue
+        if open_ > 0 and high >= low:
+            ranges.append((high - low) / open_ * 100)
+    return ranges
 
 
 class GeckoTerminal:
@@ -40,3 +52,12 @@ class GeckoTerminal:
                 continue
             mints |= base_token_mints(payload)
         return mints
+
+    async def minute_ranges_pct(self, pool_address: str, count: int) -> list[float]:
+        payload = await request_json(
+            self._client,
+            "GET",
+            f"{BASE_URL}/pools/{pool_address}/ohlcv/minute?aggregate=1&limit={count}",
+            limiter=self._limiter,
+        )
+        return candle_ranges_pct(payload)

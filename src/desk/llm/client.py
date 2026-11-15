@@ -85,6 +85,8 @@ def debate_prompt(role: str, settings: Settings) -> str:
         min_liquidity=settings.min_liquidity_usd,
         max_position_pct=settings.max_position_pct,
         stop_loss_pct=settings.stop_loss_pct,
+        max_stop_loss_pct=settings.max_stop_loss_pct,
+        take_profit_pct=settings.take_profit_pct,
         trail_activation_pct=settings.trail_activation_pct,
         trail_distance_pct=settings.trail_distance_pct,
     )

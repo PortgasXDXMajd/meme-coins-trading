@@ -114,18 +114,28 @@ async def build_desk(settings: Settings) -> AsyncGenerator[Desk]:
             max_tool_rounds=settings.max_evidence_tool_rounds,
         )
 
+        bear_llm = ClaudeLLM(
+            claude,
+            model=settings.bear_model,
+            effort=settings.llm_effort,
+            max_tool_rounds=settings.max_evidence_tool_rounds,
+        )
+
         broker = build_broker(settings, jupiter, rpc, store)
         portfolio = Portfolio(broker, store)
-        executor = Executor(broker, dex, portfolio, store, settings, events, quotes=jupiter)
+        executor = Executor(
+            broker, dex, portfolio, store, settings, events, quotes=jupiter, candles=gecko
+        )
         risk = RiskOfficer(llm, portfolio, store, settings)
         debate = Debate(
-            Bear(llm, settings),
+            Bear(bear_llm, settings),
             Analyst(llm, settings),
             risk,
             tool_factory=lambda dossier, ledger: build_evidence_tools(
                 dossier, ledger, dex, jupiter, rpc
             ),
             lessons=lambda: store.recent_lessons(settings.lessons_in_prompt),
+            max_unrebutted=settings.max_unrebutted_reasons,
         )
         pipeline = Pipeline(
             Scout(dex, gecko, settings),
@@ -174,9 +184,10 @@ async def run_forever(settings: Settings) -> None:
     async with build_desk(settings) as desk:
         open_count = len(desk.store.open_positions())
         log.info(
-            "desk started: %s mode, model %s, %d open position(s) resumed",
+            "desk started: %s mode, models %s (Bear %s), %d open position(s) resumed",
             settings.trading_mode,
             settings.debate_model,
+            settings.bear_model,
             open_count,
         )
         # Risk runs on its own loop so a slow debate can never delay a stop.

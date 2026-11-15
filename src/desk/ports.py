@@ -27,6 +27,14 @@ class QuoteSource(Protocol):
     async def sell_quote(self, mint: str, token_amount: int, taker: str | None = None) -> Order: ...
 
 
+class CandleSource(Protocol):
+    """Recent one-minute candles (GeckoTerminal in production)."""
+
+    async def minute_ranges_pct(self, pool_address: str, count: int) -> list[float]:
+        """High-to-low range of each of the last `count` one-minute candles, in %."""
+        ...
+
+
 class TokenScout(Protocol):
     async def scan(self) -> list[Candidate]: ...
 

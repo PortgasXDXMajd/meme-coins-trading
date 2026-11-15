@@ -3,8 +3,8 @@
 Two roles, one agent:
 - `RiskOfficer` (pre-trade) rules each Bear reason REBUTTED/UNREBUTTED and issues
   the `TradeApproval`, with the stop fixed before any order exists.
-- `StopMonitor` (post-trade) watches prices and exits at -6%, or at the trailing
-  stop once +12% has been reached.
+- `StopMonitor` (post-trade) watches prices, sells part at the take-profit, and
+  exits at the stop or, once +12% has been reached, at the trailing stop.
 """
 
 from __future__ import annotations
@@ -30,7 +30,12 @@ from desk.domain.models import (
     TradeApproval,
     utcnow,
 )
-from desk.domain.rules import check_stop, daily_loss_breached, position_size_usd
+from desk.domain.rules import (
+    check_stop,
+    daily_loss_breached,
+    position_size_usd,
+    take_profit_due,
+)
 from desk.llm.client import LLMResult, StructuredLLM, debate_prompt
 from desk.portfolio import Portfolio
 from desk.ports import PriceFeed, QuoteSource
@@ -81,7 +86,7 @@ class RiskOfficer:
             f"<evidence>\n{evidence_text}\n</evidence>\n\n"
             f"<bear_case>\n{render_reasons(reasons)}\n</bear_case>\n\n"
             f"<analyst_rebuttals>\n{render_rebuttals(rebuttals)}\n</analyst_rebuttals>\n\n"
-            "Rule on each of the three reasons, in order."
+            "Rule on each of the Bear's reasons, in order."
         )
         return await self._llm.ask(system=self._system, user=user, output_type=RefereeDecision)
 
@@ -187,6 +192,12 @@ class StopMonitor:
         self._record(updated, price, quote_price, dex_price, check.exit_reason)
         if check.exit_reason is None:
             self._store.update_position(updated)
+            if take_profit_due(updated, price, self._settings):
+                try:
+                    return await self._executor.take_profit(updated, price, sol_price)
+                except BrokerError as exc:
+                    log.error("risk: TAKE PROFIT FAILED for %s, retrying: %s", position.symbol, exc)
+                    self._events.emit("take_profit_failed", symbol=position.symbol, error=str(exc))
             return updated
         try:
             closed = await self._executor.sell(updated, price, sol_price, check.exit_reason)

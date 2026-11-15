@@ -94,7 +94,7 @@ def render_funnel(snapshot: Snapshot) -> None:
     stages[2].metric(
         "3 · Approved",
         funnel.approved,
-        help="Every one of the Bear's three reasons was ruled rebutted.",
+        help="At most one of the Bear's reasons was left standing.",
     )
     stages[3].metric("4 · Bought", funnel.bought)
     with st.container(horizontal=True, gap="medium"):

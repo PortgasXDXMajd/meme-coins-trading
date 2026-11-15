@@ -34,10 +34,13 @@ def in_scout_window(candidate: Candidate, settings: Settings, now: datetime) -> 
 # --------------------------------------------------------------------------
 
 
+LIQUIDITY_UNKNOWN = "liquidity unknown"
+
+
 def liquidity_kills(candidate: Candidate, settings: Settings) -> list[KillReason]:
     liquidity = candidate.liquidity_usd
     if liquidity is None:
-        return [KillReason(rule=KillRule.DATA_UNAVAILABLE, detail="liquidity unknown")]
+        return [KillReason(rule=KillRule.DATA_UNAVAILABLE, detail=LIQUIDITY_UNKNOWN)]
     if liquidity < settings.min_liquidity_usd:
         return [
             KillReason(
@@ -154,8 +157,29 @@ def entry_drift_pct(reference_price: float, current_price: float) -> float:
 # --------------------------------------------------------------------------
 
 
-def initial_stop_price(entry_price: float, settings: Settings) -> float:
-    return entry_price * (1 - settings.stop_loss_pct / 100)
+def volatility_stop_pct(minute_ranges_pct: list[float], settings: Settings) -> float:
+    """Stop distance for a new position, from its recent one-minute candle ranges.
+
+    A stop inside the token's normal one-minute swing gets hit by noise, so the stop
+    sits `stop_volatility_multiple` average ranges below entry, clamped to
+    [stop_loss_pct, max_stop_loss_pct]. No candle data means the widest stop.
+    """
+    ranges = [r for r in minute_ranges_pct if r >= 0]
+    if not ranges:
+        return settings.max_stop_loss_pct
+    pct = settings.stop_volatility_multiple * sum(ranges) / len(ranges)
+    return min(max(pct, settings.stop_loss_pct), settings.max_stop_loss_pct)
+
+
+def initial_stop_price(
+    entry_price: float, settings: Settings, stop_pct: float | None = None
+) -> float:
+    return entry_price * (1 - (stop_pct or settings.stop_loss_pct) / 100)
+
+
+def trail_distance_pct(position: Position, settings: Settings) -> float:
+    """The trail is never tighter than the noise the entry stop was sized for."""
+    return max(settings.trail_distance_pct, position.stop_pct or 0)
 
 
 @dataclass(frozen=True)
@@ -167,8 +191,8 @@ class StopCheck:
 def check_stop(position: Position, price: float, settings: Settings) -> StopCheck:
     """Advance a position's stop state for a new price and say whether to exit.
 
-    The stop starts at entry -6%. Once price has reached entry +12% the stop
-    trails the high by `trail_distance_pct`. The stop never moves down.
+    The stop starts at the entry stop. Once price has reached entry +12% the stop
+    trails the high by the trail distance. The stop never moves down.
     """
     high = max(position.high_water_price_usd, price)
     activation_price = position.entry_price_usd * (1 + settings.trail_activation_pct / 100)
@@ -176,7 +200,7 @@ def check_stop(position: Position, price: float, settings: Settings) -> StopChec
 
     stop = position.stop_price_usd
     if trailing:
-        stop = max(stop, high * (1 - settings.trail_distance_pct / 100))
+        stop = max(stop, high * (1 - trail_distance_pct(position, settings) / 100))
 
     updated = position.model_copy(
         update={"high_water_price_usd": high, "trailing_active": trailing, "stop_price_usd": stop}
@@ -185,6 +209,12 @@ def check_stop(position: Position, price: float, settings: Settings) -> StopChec
         return StopCheck(updated, None)
     reason = ExitReason.TRAILING_STOP if trailing else ExitReason.STOP_LOSS
     return StopCheck(updated, reason)
+
+
+def take_profit_due(position: Position, price: float, settings: Settings) -> bool:
+    """True the first time price reaches entry +take_profit_pct."""
+    target = position.entry_price_usd * (1 + settings.take_profit_pct / 100)
+    return not position.took_profit and price >= target
 
 
 def daily_loss_breached(day_start_equity: float, equity: float, settings: Settings) -> bool:

@@ -47,7 +47,17 @@ class Settings(BaseSettings):
     max_entry_drift_pct: float = 8
 
     # --- risk --------------------------------------------------------------
+    # The stop is sized to the token's own noise: `stop_volatility_multiple` times its
+    # average one-minute range, never tighter than `stop_loss_pct` and never wider than
+    # `max_stop_loss_pct`. Without candle data the widest stop is used.
     stop_loss_pct: float = Field(default=6, gt=0, lt=100)
+    max_stop_loss_pct: float = Field(default=12, gt=0, lt=100)
+    stop_volatility_multiple: float = Field(default=2.5, gt=0)
+    volatility_candles: int = Field(default=15, ge=3)
+    # Sell `take_profit_fraction` of the position at +`take_profit_pct`, then hold the
+    # rest with the stop moved up to at least break-even.
+    take_profit_pct: float = Field(default=18, gt=0)
+    take_profit_fraction: float = Field(default=0.5, gt=0, lt=1)
     trail_activation_pct: float = Field(default=12, gt=0)
     trail_distance_pct: float = Field(default=6, gt=0, lt=100)
     daily_loss_halt_pct: float = Field(default=20, gt=0)
@@ -56,12 +66,16 @@ class Settings(BaseSettings):
     scout_interval_seconds: float = 60
     risk_interval_seconds: float = 5
     filter_cooldown_minutes: float = 30
+    no_liquidity_cooldown_hours: float = 6  # DexScreener reports no pool liquidity
     veto_cooldown_hours: float = 6
     traded_cooldown_hours: float = 24
     max_debates_per_hour: int = 20
 
     # --- llm ---------------------------------------------------------------
-    debate_model: str = "claude-opus-5-5"
+    debate_model: str = "claude-opus-5-5"  # Analyst, referee, post-mortem, report
+    bear_model: str = "claude-sonnet-5-5"
+    # A debate approves when at most this many Bear reasons are left unrebutted.
+    max_unrebutted_reasons: int = Field(default=1, ge=0)
     llm_effort: Effort = "high"
     max_evidence_tool_rounds: int = 6
     lessons_in_prompt: int = 8

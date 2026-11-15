@@ -166,8 +166,11 @@ def render_debate(
         return
     candidate = outcome.dossier.candidate
     if outcome.approved:
+        standing = len(outcome.unrebutted)
         st.success(
-            f"### {candidate.symbol}: approved\nAll three of the Bear's reasons were answered."
+            f"### {candidate.symbol}: approved\n"
+            f"{len(outcome.reasons) - standing} of the Bear's {len(outcome.reasons)} "
+            f"reasons were answered; {standing} stood, within the desk's limit."
         )
     else:
         stood = stood_titles(outcome)
@@ -185,7 +188,7 @@ def render_debate(
     )
     render_trade_link(position)
     render_market(outcome)
-    st.markdown("#### The three reasons not to buy")
+    st.markdown("#### The reasons not to buy")
     render_reasons(outcome)
     with st.expander("Dossier: the facts both sides argued from", icon=":material/description:"):
         st.code(outcome.dossier.render(), language=None, wrap_lines=True)
@@ -205,8 +208,9 @@ def render_debate(
 def render_debates(settings: Settings, snapshot: Snapshot) -> None:
     st.title("Debates")
     st.caption(
-        "Every token that passed the Filter. The Bear gives three reasons not to buy, the "
-        "Analyst answers each with data, and Risk rules. One unanswered reason blocks the buy."
+        "Every token that passed the Filter. The Bear gives up to three reasons not to buy, "
+        "the Analyst answers each with data, and Risk rules. More than "
+        f"{settings.max_unrebutted_reasons} unanswered reason(s) block the buy."
     )
     if not snapshot.debates:
         st.info("No debates in this time window. A token must pass every Filter rule first.")

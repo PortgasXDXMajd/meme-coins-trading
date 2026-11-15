@@ -101,3 +101,21 @@ def test_jupiter_errors_raise():
 
 def test_usd_to_lamports():
     assert usd_to_lamports(20, 80) == 250_000_000
+
+
+def test_candle_ranges_from_geckoterminal_ohlcv():
+    from desk.data.geckoterminal import candle_ranges_pct
+
+    payload = {
+        "data": {
+            "attributes": {
+                "ohlcv_list": [
+                    [1, 1.0, 1.1, 0.95, 1.05, 100],
+                    [2, 0, 1, 1, 1, 0],  # no open price: skipped
+                    [3, "bad", 1, 1, 1, 0],  # unparseable: skipped
+                ]
+            }
+        }
+    }
+    assert candle_ranges_pct(payload) == [pytest.approx(15.0)]
+    assert candle_ranges_pct({}) == []

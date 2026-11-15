@@ -40,6 +40,14 @@ class FakeMarket:
         self.price = candidate.price_usd  # what the pool pays (Jupiter)
         self.dex_price: float | None = None  # set to make DexScreener lag behind the pool
         self.sell_route = True
+        # One-minute ranges of 2.4% give a 2.5 x 2.4 = 6% stop with default settings.
+        self.minute_ranges: list[float] | None = [2.4] * 15
+
+    # GeckoTerminal
+    async def minute_ranges_pct(self, pool_address: str, count: int) -> list[float]:
+        if self.minute_ranges is None:
+            raise DataError("no candles")
+        return self.minute_ranges[:count]
 
     def _at_current_price(self) -> Candidate:
         shown = self.price if self.dex_price is None else self.dex_price
@@ -103,7 +111,9 @@ class FakeFilter:
 
 
 class Desk:
-    def __init__(self, settings, store, llm: FakeLLM, *, kill: bool = False) -> None:
+    def __init__(
+        self, settings, store, llm: FakeLLM, *, kill: bool = False, max_unrebutted: int = 0
+    ) -> None:
         self.candidate = make_candidate()
         self.market = FakeMarket(self.candidate)
         self.store = store
@@ -112,7 +122,14 @@ class Desk:
         broker = PaperBroker(self.market, store, settings)
         self.portfolio = Portfolio(broker, store)
         self.executor = Executor(
-            broker, self.market, self.portfolio, store, settings, events, quotes=self.market
+            broker,
+            self.market,
+            self.portfolio,
+            store,
+            settings,
+            events,
+            quotes=self.market,
+            candles=self.market,
         )
         self.risk = RiskOfficer(llm, self.portfolio, store, settings, clock=lambda: NOW)
         self.closed: list = []
@@ -132,6 +149,7 @@ class Desk:
                 Analyst(llm, settings),
                 self.risk,
                 tool_factory=lambda d, ledger: [],
+                max_unrebutted=max_unrebutted,
             ),
             self.risk,
             self.executor,
@@ -232,10 +250,11 @@ async def test_trailing_stop_takes_profit_after_plus_twelve(settings, store):
     desk = Desk(settings, store, winning_llm())
     await desk.pipeline.run_cycle()
 
-    desk.market.price = 0.0015  # +50%: trail arms, stop moves to 0.00141
+    desk.market.price = 0.0015  # +50%: trail arms, stop moves to 0.00141, half is sold
     assert await desk.monitor.check_positions() == []
     (position,) = store.open_positions()
     assert position.trailing_active
+    assert position.took_profit
     assert position.stop_price_usd == pytest.approx(0.00141)
 
     desk.market.price = 0.0014
@@ -342,3 +361,83 @@ async def test_position_without_a_quote_basis_calibrates_on_its_first_check(sett
     await desk.monitor.check_positions()
     (held,) = store.open_positions()
     assert held.last_price_usd == pytest.approx(0.001)
+
+
+# --- volatility stop, take-profit, debate threshold, liquidity cooldown ------------
+
+
+async def test_stop_is_sized_from_one_minute_volatility(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    desk.market.minute_ranges = [4.0] * 15  # 2.5 x 4% = 10% stop
+    (position,) = await desk.pipeline.run_cycle()
+    assert position.stop_pct == pytest.approx(10)
+    assert position.stop_price_usd == pytest.approx(0.0009)
+    assert position.cost_usd == pytest.approx(20 + settings.paper_network_fee_usd)  # size kept
+
+    desk.market.price = 0.00094  # -6%: inside the noise, so it holds
+    assert await desk.monitor.check_positions() == []
+
+
+async def test_stop_is_capped_and_falls_back_to_the_widest_without_candles(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    desk.market.minute_ranges = None
+    (position,) = await desk.pipeline.run_cycle()
+    assert position.stop_pct == pytest.approx(settings.max_stop_loss_pct)
+
+
+async def test_take_profit_sells_half_and_moves_the_stop_to_break_even(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    (position,) = await desk.pipeline.run_cycle()
+    cash_after_buy = await desk.portfolio.cash_usd(80)
+
+    desk.market.price = 0.00119  # +19%, past the +18% take-profit
+    assert await desk.monitor.check_positions() == []
+    (held,) = store.open_positions()
+    assert held.took_profit
+    assert held.token_amount_raw == position.token_amount_raw // 2
+    assert held.open_fraction == pytest.approx(0.5, abs=1e-6)
+    assert held.realized_usd > 0
+    assert held.stop_price_usd >= held.entry_price_usd
+    assert await desk.portfolio.cash_usd(80) == pytest.approx(cash_after_buy + held.realized_usd)
+
+    desk.market.price = 0.00125  # no second take-profit
+    await desk.monitor.check_positions()
+    (again,) = store.open_positions()
+    assert again.realized_usd == pytest.approx(held.realized_usd)
+
+    desk.market.price = 0.001  # back to entry: the rest goes at break-even
+    (closed,) = await desk.monitor.check_positions()
+    rest = held.token_amount_raw * 0.001 * (1 - FEE_RATE) - settings.paper_network_fee_usd
+    assert closed.proceeds_usd == pytest.approx(held.realized_usd + rest)
+    assert closed.pnl_usd is not None and closed.pnl_usd > 0
+
+
+async def test_one_standing_reason_still_trades_when_allowed(settings, store):
+    llm = FakeLLM(bear_case(), analyst_response(), referee_decision(unrebutted=(2,)))
+    desk = Desk(settings, store, llm, max_unrebutted=1)
+    assert len(await desk.pipeline.run_cycle()) == 1
+
+
+async def test_tokens_without_liquidity_data_are_skipped_for_hours(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    desk.pipeline._scout = FakeScout([desk.candidate.model_copy(update={"liquidity_usd": None})])
+
+    class LiquidityFilter(FakeFilter):
+        async def evaluate(self, candidate):
+            from desk.domain.rules import liquidity_kills
+
+            return FilterVerdict(
+                candidate=candidate, kills=tuple(liquidity_kills(candidate, settings))
+            )
+
+    desk.pipeline._filter = LiquidityFilter()
+    await desk.pipeline.run_cycle()
+    assert store.on_cooldown(desk.candidate.mint, NOW + timedelta(hours=5))
+    assert not store.on_cooldown(desk.candidate.mint, NOW + timedelta(hours=7))
+
+
+async def test_other_filter_kills_cool_down_for_thirty_minutes(settings, store):
+    desk = Desk(settings, store, winning_llm(), kill=True)
+    await desk.pipeline.run_cycle()
+    assert store.on_cooldown(desk.candidate.mint, NOW + timedelta(minutes=29))
+    assert not store.on_cooldown(desk.candidate.mint, NOW + timedelta(minutes=31))

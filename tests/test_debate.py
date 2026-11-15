@@ -1,4 +1,4 @@
-"""The debate: only three REBUTTED rulings approve; everything else is a veto."""
+"""The debate: approval needs no more than `max_unrebutted` reasons left standing."""
 
 from __future__ import annotations
 
@@ -36,18 +36,19 @@ def dossier(settings):
     return build_dossier(make_verdict(), settings, NOW)
 
 
-def make_debate(llm: FakeLLM, settings, store) -> Debate:
+def make_debate(llm: FakeLLM, settings, store, max_unrebutted: int = 0) -> Debate:
     referee = RiskOfficer(llm, Portfolio(CashOnlyBroker(), store), store, settings)
     return Debate(
         Bear(llm, settings),
         Analyst(llm, settings),
         referee,
         tool_factory=lambda dossier, ledger: [],
+        max_unrebutted=max_unrebutted,
     )
 
 
-async def run(llm: FakeLLM, dossier, settings, store) -> DebateOutcome:
-    return await make_debate(llm, settings, store).run(dossier)
+async def run(llm: FakeLLM, dossier, settings, store, max_unrebutted: int = 0) -> DebateOutcome:
+    return await make_debate(llm, settings, store, max_unrebutted).run(dossier)
 
 
 async def test_all_three_rebutted_is_approved(dossier, settings, store):
@@ -95,12 +96,67 @@ async def test_citations_are_matched_loosely_on_format(dossier, settings, store)
     assert (await run(llm, dossier, settings, store)).approved
 
 
-@pytest.mark.parametrize("count", [0, 2, 4])
-async def test_bear_must_give_exactly_three_reasons(dossier, settings, store, count):
+@pytest.mark.parametrize("count", [0, 4])
+async def test_bear_must_give_one_to_three_reasons(dossier, settings, store, count):
     llm = FakeLLM(bear_case(count=count), analyst_response(), referee_decision())
     outcome = await run(llm, dossier, settings, store)
     assert not outcome.approved
     assert llm.calls == ["BearCase"]
+
+
+@pytest.mark.parametrize("count", [1, 2])
+async def test_reasons_the_bear_did_not_give_count_as_answered(dossier, settings, store, count):
+    llm = FakeLLM(
+        bear_case(count=count),
+        analyst_response(skip=range(count + 1, 4)),
+        referee_decision(skip=range(count + 1, 4)),
+    )
+    outcome = await run(llm, dossier, settings, store)
+    assert outcome.approved
+    assert len(outcome.rulings) == count
+
+
+@pytest.mark.parametrize("unrebutted", [(1,), (3,)])
+async def test_one_standing_reason_is_allowed_at_the_threshold(
+    dossier, settings, store, unrebutted
+):
+    llm = FakeLLM(bear_case(), analyst_response(), referee_decision(unrebutted=unrebutted))
+    outcome = await run(llm, dossier, settings, store, max_unrebutted=1)
+    assert outcome.approved
+    assert outcome.veto_reasons == ()
+    assert [r.reason_number for r in outcome.unrebutted] == list(unrebutted)
+    assert TradeApproval(outcome=outcome, stop_loss_pct=6, max_size_usd=20)
+
+
+async def test_two_standing_reasons_veto_at_the_threshold(dossier, settings, store):
+    llm = FakeLLM(bear_case(), analyst_response(), referee_decision(unrebutted=(1, 3)))
+    outcome = await run(llm, dossier, settings, store, max_unrebutted=1)
+    assert not outcome.approved
+    assert len(outcome.veto_reasons) == 2
+
+
+async def test_one_concession_still_goes_to_the_referee_at_the_threshold(dossier, settings, store):
+    llm = FakeLLM(bear_case(), analyst_response(conceded=(2,)), referee_decision())
+    outcome = await run(llm, dossier, settings, store, max_unrebutted=1)
+    assert outcome.approved
+    assert "RefereeDecision" in llm.calls
+    assert outcome.rulings[1].verdict is RulingVerdict.UNREBUTTED  # the concession stands
+
+
+async def test_two_concessions_veto_without_the_referee(dossier, settings, store):
+    llm = FakeLLM(bear_case(), analyst_response(conceded=(1, 2)), referee_decision())
+    outcome = await run(llm, dossier, settings, store, max_unrebutted=1)
+    assert not outcome.approved
+    assert "RefereeDecision" not in llm.calls
+
+
+async def test_old_debates_load_with_the_strict_rule(dossier, settings, store):
+    llm = FakeLLM(bear_case(), analyst_response(), referee_decision(unrebutted=(1,)))
+    outcome = await run(llm, dossier, settings, store, max_unrebutted=1)
+    stored = outcome.model_dump(mode="json")
+    stored.pop("max_unrebutted")
+    stored["veto_reasons"] = ["Reason 1 (Risk 1) left unrebutted: Rationale 1"]
+    assert not DebateOutcome.model_validate(stored).approved
 
 
 async def test_bear_citing_nonexistent_facts_is_a_veto(dossier, settings, store):

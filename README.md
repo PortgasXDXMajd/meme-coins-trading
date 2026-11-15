@@ -1,6 +1,6 @@
 # Memecoin Desk
 
-A six-agent Solana memecoin trading desk with a devil's advocate. Every buy must survive a debate: the Bear gives three on-chain reasons not to buy, the Analyst must rebut each with data, and Risk rules on each one. Any reason left unrebutted is a veto.
+A six-agent Solana memecoin momentum desk with a devil's advocate. It does not invest: it buys tokens that are moving and rides the move for minutes to hours. Every buy must survive a debate: the Bear gives up to three reasons not to buy now, the Analyst rebuts each with data, and Risk rules on each one. Two or more reasons left standing is a veto.
 
 It runs in **paper mode** by default: live market data and live Jupiter quotes, simulated fills.
 
@@ -10,9 +10,9 @@ It runs in **paper mode** by default: live market data and live Jupiter quotes, 
 |---|---|---|
 | Scout | code | Finds pairs 30 min – 72 h old with a $300k – $20M market cap |
 | Filter | code | Kills on: mint or freeze authority not revoked, LP not burned, liquidity < $40k, top 10 > 25%, dev > 3%, transfer fee, dangerous token extensions, no sell route. Missing data is a kill |
-| Bear | Claude | Three concrete on-chain reasons not to buy, each citing dossier facts. Can inspect wallets, quote large exits and refresh the market |
+| Bear | Claude (Sonnet) | Up to three concrete reasons this entry loses money in the next hour, each citing dossier facts. Can inspect wallets, quote large exits and refresh the market |
 | Analyst | Claude | Rebuts each reason with cited data, or concedes |
-| Risk | Claude + code | Referees the debate (doubt goes to the Bear), sets the −6% stop before entry, then trails the stop 6% below the high once +12% is reached |
+| Risk | Claude + code | Referees the debate (at most one reason may stand), sizes the stop from the token's one-minute volatility, sells half at +18% and moves the stop to break-even, and trails the high once +12% is reached |
 | Executor | code | Buys at most 8% of equity, and only with Risk's approval |
 
 Hard limits live in code (`src/desk/domain/rules.py`) and cannot be argued with. Claude does the judgement. After each closed trade Claude also writes a one-line lesson that the Bear reads in later debates.
@@ -54,14 +54,14 @@ To stop new entries without stopping the desk, create `data/HALT`. Open position
 
 ## Where to look
 
-- `logs/debates/<date>/<time>-<symbol>-<mint>.md` — the full debate for every token that passed the Filter: dossier, three reasons, three rebuttals, three rulings, evidence gathered.
+- `logs/debates/<date>/<time>-<symbol>-<mint>.md` — the full debate for every token that passed the Filter: dossier, the Bear's reasons, rebuttals, rulings, evidence gathered.
 - `logs/desk.log` — everything the desk did, in order.
 - `logs/events.jsonl` — the same as structured records (kills, debates, buys, sells).
 - `data/desk.db` — SQLite: positions, debates, lessons, paper cash, and `price_checks` (every stop-monitor pass: the Jupiter quote price, the DexScreener price, which one was used, the stop and the high).
 
 ## Settings
 
-Every threshold is in `src/desk/config.py` and can be overridden in `.env` (see `.env.example`). Defaults: stop −6%, trail arms at +12% and follows 6% below the high, 8% per trade, 5 open positions, new entries halt after a 20% daily loss, 20 debates per hour.
+Every threshold is in `src/desk/config.py` and can be overridden in `.env` (see `.env.example`). Defaults: stop at 2.5× the token's average one-minute range, between −6% and −12% (−12% when no candles are available); sell half at +18% and move the stop to break-even; trail arms at +12% and follows the high by the entry stop's distance (at least 6%); 8% per trade; 5 open positions; new entries halt after a 20% daily loss; 20 debates per hour; a debate approves with at most 1 reason standing (`MAX_UNREBUTTED_REASONS`). Tokens DexScreener reports no liquidity for are skipped for 6 hours.
 
 Optional free keys that help: `JUPITER_API_KEY` (doubles the quote rate limit) and `HELIUS_API_KEY` (faster RPC for wallet lookups).
 
@@ -76,7 +76,7 @@ Live trading is built but has not been run with real funds. Do these in order:
 
 Things to know before risking money:
 
-- Stops are market sells triggered by a 5-second poll. Each poll prices the position from a live Jupiter sell quote (DexScreener can lag a dump) and falls back to DexScreener when no quote comes back. A dump faster than one poll still fills below −6%.
+- Stops and the take-profit are market sells triggered by a 5-second poll. Each poll prices the position from a live Jupiter sell quote (DexScreener can lag a dump) and falls back to DexScreener when no quote comes back. A dump faster than one poll still fills below −6%.
 - A round trip costs roughly 1–4% on these tokens (pool fees, Jupiter's fee, price impact). Paper P&L already includes it because fills use real quotes.
 - The wallet key sits unencrypted on this machine. Keep only the trading bankroll in it.
 

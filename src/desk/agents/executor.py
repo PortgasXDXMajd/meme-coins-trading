@@ -13,9 +13,10 @@ from desk.domain.rules import (
     initial_stop_price,
     liquidity_kills,
     position_size_usd,
+    volatility_stop_pct,
 )
 from desk.portfolio import Portfolio
-from desk.ports import PriceFeed, QuoteSource
+from desk.ports import CandleSource, PriceFeed, QuoteSource
 from desk.storage.db import Store
 from desk.storage.debate_log import EventLog
 
@@ -33,9 +34,11 @@ class Executor:
         events: EventLog,
         *,
         quotes: QuoteSource | None = None,
+        candles: CandleSource | None = None,
     ) -> None:
         self._broker = broker
         self._quotes = quotes
+        self._candles = candles
         self._dex = dex
         self._portfolio = portfolio
         self._store = store
@@ -73,6 +76,7 @@ class Executor:
             return self._skip(approved.symbol, f"buy failed: {exc}")
 
         entry = fresh.price_usd
+        stop_pct = await self._stop_pct(fresh.pair_address)
         position = self._store.insert_position(
             Position(
                 mint=approved.mint,
@@ -81,7 +85,8 @@ class Executor:
                 token_amount_raw=fill.token_amount_raw,
                 cost_usd=fill.usd_value,
                 entry_price_usd=entry,
-                stop_price_usd=initial_stop_price(entry, self._settings),
+                stop_pct=stop_pct,
+                stop_price_usd=initial_stop_price(entry, self._settings, stop_pct),
                 high_water_price_usd=entry,
                 last_price_usd=entry,
                 quote_basis_usd=await self._quote_basis(approved.mint, fill.token_amount_raw),
@@ -89,11 +94,12 @@ class Executor:
             )
         )
         log.info(
-            "BUY %s $%.2f at $%.10g, stop $%.10g (%s)",
+            "BUY %s $%.2f at $%.10g, stop $%.10g (-%.1f%%) (%s)",
             position.symbol,
             position.cost_usd,
             entry,
             position.stop_price_usd,
+            stop_pct,
             "paper" if fill.simulated else "LIVE",
         )
         self._events.emit("buy", position=position.model_dump(mode="json"), tx_id=fill.tx_id)
@@ -102,12 +108,12 @@ class Executor:
     async def sell(
         self, position: Position, price_usd: float, sol_price_usd: float, reason: ExitReason
     ) -> Position:
-        """Sell the whole position. Raises BrokerError if the swap fails."""
+        """Sell what is left of the position. Raises BrokerError if the swap fails."""
         fill = await self._broker.sell(position.mint, position.token_amount_raw, sol_price_usd)
         closed = position.model_copy(
             update={
                 "closed_at": utcnow(),
-                "proceeds_usd": fill.usd_value,
+                "proceeds_usd": position.realized_usd + fill.usd_value,
                 "exit_price_usd": price_usd,
                 "exit_reason": reason,
                 "last_price_usd": price_usd,
@@ -124,6 +130,55 @@ class Executor:
         )
         self._events.emit("sell", position=closed.model_dump(mode="json"), tx_id=fill.tx_id)
         return closed
+
+    async def take_profit(
+        self, position: Position, price_usd: float, sol_price_usd: float
+    ) -> Position:
+        """Sell part of the position and move its stop to at least break-even.
+
+        Raises BrokerError if the swap fails; the position is then unchanged.
+        """
+        sold = int(position.token_amount_raw * self._settings.take_profit_fraction)
+        if sold <= 0 or sold >= position.token_amount_raw:
+            raise BrokerError(f"cannot split {position.token_amount_raw} tokens")
+        fill = await self._broker.sell(position.mint, sold, sol_price_usd)
+        kept = (position.token_amount_raw - sold) / position.token_amount_raw
+        basis = position.quote_basis_usd
+        updated = position.model_copy(
+            update={
+                "token_amount_raw": position.token_amount_raw - sold,
+                "open_fraction": position.open_fraction * kept,
+                "realized_usd": position.realized_usd + fill.usd_value,
+                # The sell quote now covers fewer tokens; keep it on the entry's scale.
+                "quote_basis_usd": basis * kept if basis is not None else None,
+                "took_profit": True,
+                "stop_price_usd": max(position.stop_price_usd, position.entry_price_usd),
+                "last_price_usd": price_usd,
+            }
+        )
+        self._store.update_position(updated)
+        log.info(
+            "TAKE PROFIT %s: sold %.0f%% for $%.2f at $%.10g, stop now $%.10g",
+            position.symbol,
+            100 * (1 - kept),
+            fill.usd_value,
+            price_usd,
+            updated.stop_price_usd,
+        )
+        self._events.emit("take_profit", position=updated.model_dump(mode="json"), tx_id=fill.tx_id)
+        return updated
+
+    async def _stop_pct(self, pool_address: str) -> float:
+        """Stop distance from the pool's recent one-minute volatility."""
+        ranges: list[float] = []
+        if self._candles is not None:
+            try:
+                ranges = await self._candles.minute_ranges_pct(
+                    pool_address, self._settings.volatility_candles
+                )
+            except DataError as exc:
+                log.warning("executor: no candles for %s, widest stop: %s", pool_address, exc)
+        return volatility_stop_pct(ranges, self._settings)
 
     async def _quote_basis(self, mint: str, token_amount_raw: int) -> float | None:
         """Sell-quote value of the new position, the reference for quote-priced stops."""

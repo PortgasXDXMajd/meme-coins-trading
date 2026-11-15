@@ -28,7 +28,7 @@ class Analyst:
             f"<dossier>\n{dossier.render()}\n</dossier>\n\n"
             f"<evidence>\n{ledger.render()}\n</evidence>\n\n"
             f"<bear_case>\n{render_reasons(reasons)}\n</bear_case>\n\n"
-            "Rebut or concede each of the three reasons, in order."
+            "Rebut or concede each of the Bear's reasons, in order."
         )
         return await self._llm.ask(
             system=self._system, user=user, output_type=AnalystResponse, tools=tools

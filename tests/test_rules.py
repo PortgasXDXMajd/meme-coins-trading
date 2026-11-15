@@ -16,6 +16,8 @@ from desk.domain.rules import (
     position_size_usd,
     round_trip_kills,
     safety_kills,
+    take_profit_due,
+    volatility_stop_pct,
 )
 from tests.conftest import NOW, make_candidate, make_safety
 
@@ -203,3 +205,38 @@ def test_daily_loss_halt(settings):
     assert not daily_loss_breached(250, 201, settings)
     assert daily_loss_breached(250, 200, settings)  # -20%
     assert daily_loss_breached(0, 0, settings)
+
+
+# --- Volatility stop and take-profit -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        ([4.0] * 15, 10.0),  # 2.5 x 4%
+        ([1.0] * 15, 6.0),  # floor
+        ([8.0] * 15, 12.0),  # cap
+        ([], 12.0),  # no data: widest
+    ],
+)
+def test_volatility_stop_pct(settings, ranges, expected):
+    assert volatility_stop_pct(ranges, settings) == pytest.approx(expected)
+
+
+def test_initial_stop_uses_the_volatility_stop(settings):
+    assert initial_stop_price(1.0, settings, 10) == pytest.approx(0.90)
+
+
+def test_trail_is_as_wide_as_the_entry_stop(settings):
+    position = check_stop(open_position(stop_pct=10, stop_price_usd=0.9), 1.50, settings).position
+    assert position.stop_price_usd == pytest.approx(1.35)
+
+
+def test_take_profit_fires_once_at_plus_eighteen(settings):
+    assert not take_profit_due(open_position(), 1.17, settings)
+    assert take_profit_due(open_position(), 1.19, settings)
+    assert not take_profit_due(open_position(took_profit=True), 1.50, settings)
+
+
+def test_value_counts_only_what_is_still_held(settings):
+    assert open_position(open_fraction=0.5).value_at(2.0) == pytest.approx(20.0)

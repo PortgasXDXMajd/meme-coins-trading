@@ -31,6 +31,7 @@ from desk.storage.db import PriceCheck
 EXIT_LABELS = {
     ExitReason.STOP_LOSS: "Stop-loss",
     ExitReason.TRAILING_STOP: "Trailing stop",
+    ExitReason.TAKE_PROFIT: "Take-profit",
     ExitReason.MANUAL: "Sold by hand",
 }
 
@@ -94,13 +95,16 @@ def render_steps(position: Position, approved_at: str | None) -> None:
     high_pct = change_pct(position, position.high_water_price_usd)
     steps = []
     if approved_at:
-        steps.append(
-            f"**{approved_at}** · The debate approved it: all three Bear reasons answered."
-        )
+        steps.append(f"**{approved_at}** · The debate approved it: at most one Bear reason stood.")
     steps.append(
         f"**{when(position.opened_at)}** · Bought for {usd(position.cost_usd)} at "
-        f"${entry:.8g}. Stop-loss set 6% lower."
+        f"${entry:.8g}. Stop-loss set {position.stop_pct or 6:.1f}% lower."
     )
+    if position.took_profit:
+        steps.append(
+            f"Took profit on part of it for {usd(position.realized_usd)}; "
+            "stop moved to at least break-even."
+        )
     if position.trailing_active:
         steps.append(
             f"Price peaked at ${position.high_water_price_usd:.8g} ({pct(high_pct)}). "
@@ -243,8 +247,9 @@ def render_trade(settings: Settings, snapshot: Snapshot, position: Position) -> 
 def render_trades(settings: Settings, snapshot: Snapshot) -> None:
     st.title("Trades")
     st.caption(
-        "Every position the desk opened. Each one exits at -6%, or, once it is up 12%, "
-        "at a trailing stop 6% below its highest price."
+        "Every position the desk opened. The stop is sized from the token's one-minute "
+        "volatility (6–12% below entry). At +18% half is sold and the stop moves to "
+        "break-even; from +12% the stop trails the highest price."
     )
     positions = sorted(
         [*snapshot.open_positions, *snapshot.closed_positions],

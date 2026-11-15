@@ -12,7 +12,15 @@ from desk.agents.executor import Executor
 from desk.agents.risk import RiskOfficer
 from desk.config import Settings
 from desk.debate import Debate
-from desk.domain.models import Candidate, DebateOutcome, FilterVerdict, Position, utcnow
+from desk.domain.models import (
+    Candidate,
+    DebateOutcome,
+    FilterVerdict,
+    KillRule,
+    Position,
+    utcnow,
+)
+from desk.domain.rules import LIQUIDITY_UNKNOWN
 from desk.dossier import build_dossier
 from desk.ports import TokenFilter, TokenScout
 from desk.storage.db import Store
@@ -95,7 +103,12 @@ class Pipeline:
             self._cooldown(candidate, "vetoed", outcome, hours=self._settings.veto_cooldown_hours)
             return None
 
-        log.info("debate: %s APPROVED, all three reasons rebutted", candidate.symbol)
+        log.info(
+            "debate: %s APPROVED, %d of %d reasons left standing",
+            candidate.symbol,
+            len(outcome.unrebutted),
+            len(outcome.reasons),
+        )
         self._cooldown(candidate, "approved", outcome, hours=self._settings.traded_cooldown_hours)
         approval = await self._risk.approve(outcome)
         if approval is None:
@@ -112,8 +125,18 @@ class Pipeline:
             candidate.symbol,
             "filtered",
             {"kills": kills},
-            self._clock() + timedelta(minutes=self._settings.filter_cooldown_minutes),
+            self._clock() + self._kill_cooldown(verdict),
         )
+
+    def _kill_cooldown(self, verdict: FilterVerdict) -> timedelta:
+        """Tokens DexScreener shows no liquidity for rarely gain it soon; skip them longer."""
+        no_liquidity = any(
+            k.rule is KillRule.DATA_UNAVAILABLE and k.detail == LIQUIDITY_UNKNOWN
+            for k in verdict.kills
+        )
+        if no_liquidity:
+            return timedelta(hours=self._settings.no_liquidity_cooldown_hours)
+        return timedelta(minutes=self._settings.filter_cooldown_minutes)
 
     def _cooldown(
         self, candidate: Candidate, outcome_name: str, outcome: DebateOutcome, *, hours: float

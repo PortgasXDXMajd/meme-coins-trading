@@ -1,5 +1,8 @@
-"""The debate: Bear argues, Analyst rebuts, Risk rules. Anything short of three
-REBUTTED rulings is a veto, and every failure along the way fails closed.
+"""The debate: Bear argues, Analyst rebuts, Risk rules.
+
+The Bear gives one to three reasons. The trade is approved when no more than
+`max_unrebutted` of them are left standing; reasons the Bear did not give count as
+answered. Every failure along the way (an LLM error, an invalid case) fails closed.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ from typing import Protocol
 from desk.agents.analyst import Analyst
 from desk.agents.bear import Bear
 from desk.domain.models import (
-    REQUIRED_BEAR_REASONS,
+    MAX_BEAR_REASONS,
     BearReason,
     DebateOutcome,
     Dossier,
@@ -56,8 +59,10 @@ def citation_problem(cited: Sequence[str], known_ids: set[str]) -> str | None:
 
 
 def bear_case_problem(reasons: Sequence[BearReason], known_ids: set[str]) -> str | None:
-    if len(reasons) != REQUIRED_BEAR_REASONS:
-        return f"gave {len(reasons)} reasons instead of {REQUIRED_BEAR_REASONS}"
+    if not reasons:
+        return "gave no reasons"
+    if len(reasons) > MAX_BEAR_REASONS:
+        return f"gave {len(reasons)} reasons, more than {MAX_BEAR_REASONS}"
     for number, reason in enumerate(reasons, start=1):
         problem = citation_problem(reason.cited_facts, known_ids)
         if problem:
@@ -65,10 +70,12 @@ def bear_case_problem(reasons: Sequence[BearReason], known_ids: set[str]) -> str
     return None
 
 
-def automatic_rulings(rebuttals: dict[int, Rebuttal], known_ids: set[str]) -> list[Ruling]:
+def automatic_rulings(
+    rebuttals: dict[int, Rebuttal], known_ids: set[str], reason_count: int
+) -> list[Ruling]:
     """Rulings that need no judgement: missing, conceded or uncited rebuttals lose."""
     rulings = []
-    for number in range(1, REQUIRED_BEAR_REASONS + 1):
+    for number in range(1, reason_count + 1):
         rebuttal = rebuttals.get(number)
         if rebuttal is None:
             why = "the Analyst gave no rebuttal"
@@ -88,9 +95,12 @@ def automatic_rulings(rebuttals: dict[int, Rebuttal], known_ids: set[str]) -> li
     return rulings
 
 
-def complete_rulings(decision: RefereeDecision) -> list[Ruling]:
-    """Exactly one ruling per reason; anything the referee skipped counts as UNREBUTTED."""
-    by_number: dict[int, Ruling] = {}
+def complete_rulings(
+    decision: RefereeDecision, reason_count: int, automatic: Sequence[Ruling] = ()
+) -> list[Ruling]:
+    """Exactly one ruling per reason. Automatic rulings win over the referee's, and
+    anything the referee skipped counts as UNREBUTTED."""
+    by_number: dict[int, Ruling] = {r.reason_number: r for r in automatic}
     for ruling in decision.rulings:
         by_number.setdefault(ruling.reason_number, ruling)
     return [
@@ -102,7 +112,7 @@ def complete_rulings(decision: RefereeDecision) -> list[Ruling]:
                 rationale="Automatic: the referee gave no ruling.",
             ),
         )
-        for number in range(1, REQUIRED_BEAR_REASONS + 1)
+        for number in range(1, reason_count + 1)
     ]
 
 
@@ -114,12 +124,14 @@ class Debate:
         referee: Referee,
         tool_factory: ToolFactory,
         lessons: Callable[[], Sequence[str]] = lambda: (),
+        max_unrebutted: int = 0,
     ) -> None:
         self._bear = bear
         self._analyst = analyst
         self._referee = referee
         self._tool_factory = tool_factory
         self._lessons = lessons
+        self._max_unrebutted = max_unrebutted
 
     async def run(self, dossier: Dossier) -> DebateOutcome:
         started_at = utcnow()
@@ -141,6 +153,7 @@ class Debate:
                 usage=usage,
                 started_at=started_at,
                 finished_at=utcnow(),
+                max_unrebutted=self._max_unrebutted,
             )
 
         def known_ids() -> set[str]:
@@ -168,9 +181,11 @@ class Debate:
             by_number.setdefault(rebuttal.reason_number, rebuttal)
         rebuttals = tuple(by_number[n] for n in sorted(by_number))
 
-        rulings = tuple(automatic_rulings(by_number, known_ids()))
-        if rulings:
-            return finish(*self._unrebutted(reasons, rulings))
+        automatic = automatic_rulings(by_number, known_ids(), len(reasons))
+        if len(automatic) > self._max_unrebutted or len(automatic) == len(reasons):
+            # Already decided: too many reasons stand, or there is nothing left to judge.
+            rulings = tuple(automatic)
+            return finish(*self._veto(reasons, rulings))
 
         # 3. Risk referee
         try:
@@ -178,8 +193,13 @@ class Debate:
         except LLMFailure as exc:
             return finish(f"Risk could not rule on the debate: {exc}")
         usage += decision.usage
-        rulings = tuple(complete_rulings(decision.output))
-        return finish(*self._unrebutted(reasons, rulings))
+        rulings = tuple(complete_rulings(decision.output, len(reasons), automatic))
+        return finish(*self._veto(reasons, rulings))
+
+    def _veto(self, reasons: Sequence[BearReason], rulings: Sequence[Ruling]) -> list[str]:
+        """The veto lines when too many reasons stand; none when the trade survives."""
+        standing = self._unrebutted(reasons, rulings)
+        return standing if len(standing) > self._max_unrebutted else []
 
     @staticmethod
     def _unrebutted(reasons: Sequence[BearReason], rulings: Sequence[Ruling]) -> list[str]:
