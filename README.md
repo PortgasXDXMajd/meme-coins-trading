@@ -43,6 +43,8 @@ uv run desk once --no-debate                       # one Scout + trigger + Filte
 
 Run the desk either in Docker or natively, not both at once: they share `data/desk.db`.
 
+For the same reason, never open `data/desk.db` from macOS (`sqlite3`, a DB browser) while the containers run. SQLite's locks do not cross Docker's file sharing, and even a read can damage the file. Query it inside the container with `docker compose exec desk python`, or stop the desk first.
+
 ## Dashboard
 
 ```bash
