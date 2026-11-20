@@ -267,10 +267,23 @@ class DebateOutcome(Frozen):
 # --------------------------------------------------------------------------
 
 
+class Clearance(Frozen):
+    """A won debate that is still valid: the token may be bought the moment it triggers."""
+
+    mint: str
+    symbol: str
+    debate_id: int
+    cleared_at: datetime
+    expires_at: datetime
+
+
 class TradeApproval(Frozen):
     """Risk's sign-off. Only a won debate can produce one."""
 
     outcome: DebateOutcome
+    # The snapshot that triggered the buy. A token cleared in advance triggers after
+    # its debate; None means the debated snapshot is itself the trigger.
+    trigger: Candidate | None = None
     stop_loss_pct: float = Field(gt=0, lt=100)
     max_size_usd: float = Field(gt=0)
     approved_at: datetime = Field(default_factory=utcnow)
@@ -279,11 +292,14 @@ class TradeApproval(Frozen):
     def _debate_must_be_won(self) -> TradeApproval:
         if not self.outcome.approved:
             raise ValueError("TradeApproval requires a won debate")
+        if self.trigger is not None and self.trigger.mint != self.outcome.dossier.candidate.mint:
+            raise ValueError("TradeApproval's trigger must be the debated token")
         return self
 
     @property
     def candidate(self) -> Candidate:
-        return self.outcome.dossier.candidate
+        """The token as it was when the buy was triggered."""
+        return self.trigger or self.outcome.dossier.candidate
 
 
 class Fill(Frozen):

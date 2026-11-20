@@ -1,4 +1,4 @@
-"""Scout: finds pairs 30 minutes to 72 hours old with a $300k-$20M market cap."""
+"""Scout: finds pairs 30 minutes to 30 days old with a $300k-$20M market cap."""
 
 from __future__ import annotations
 
@@ -20,11 +20,17 @@ WATCHLIST_KEY = "scout_watchlist"
 OVERSIZE_MULTIPLE = 2
 
 
+def _recent_volume_usd(candidate: Candidate) -> float:
+    """Volume over the last 6 hours, or the last hour when that is all that is reported."""
+    return max(candidate.volume_usd.h6 or 0.0, candidate.volume_usd.h1 or 0.0)
+
+
 class Scout:
     """Keeps a watchlist of recently surfaced tokens and reports those in the window.
 
     Tokens usually surface before they qualify (too young, or too small), so they
-    stay on the watchlist and are re-priced every scan until they age out. That is
+    stay on the watchlist and are re-priced every scan until they age out or stop
+    trading. That is
     how the desk sees a move as it starts instead of when a trending list shows it.
 
     `discover` (slow feeds) and `scan` (one batch of price snapshots) run on separate
@@ -76,19 +82,23 @@ class Scout:
         return in_window
 
     def _keep(self, snapshots: dict[str, Candidate], now: datetime) -> set[str]:
-        """Tokens worth another look: young enough and not far too big, up to the size cap.
+        """Tokens worth another look: still trading, young enough and not far too big.
 
-        When the list is full, tokens already in the window stay first, then the ones
-        closest to growing into it.
+        A token nobody has traded for hours cannot trigger, so it gives up its place;
+        the feeds add it again if it wakes up. When the list is full, tokens already in
+        the window stay first, then the busiest.
         """
         ceiling = self._settings.max_market_cap_usd * OVERSIZE_MULTIPLE
         alive = [
             c
             for c in snapshots.values()
-            if c.age_hours(now) <= self._settings.max_pair_age_hours and c.market_cap_usd <= ceiling
+            if c.age_hours(now) <= self._settings.max_pair_age_hours
+            and c.market_cap_usd <= ceiling
+            and _recent_volume_usd(c) >= self._settings.watchlist_min_volume_h6_usd
         ]
         alive.sort(
-            key=lambda c: (in_scout_window(c, self._settings, now), c.market_cap_usd), reverse=True
+            key=lambda c: (in_scout_window(c, self._settings, now), _recent_volume_usd(c)),
+            reverse=True,
         )
         return {c.mint for c in alive[: self._settings.watchlist_max_size]}
 

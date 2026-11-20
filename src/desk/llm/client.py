@@ -79,7 +79,7 @@ def debate_prompt(role: str, settings: Settings) -> str:
     """A debate role's prompt plus the desk baseline all three roles share."""
     baseline = load_prompt("desk_baseline").format(
         min_age_minutes=settings.min_pair_age_minutes,
-        max_age_hours=settings.max_pair_age_hours,
+        max_age_days=settings.max_pair_age_hours / 24,
         min_market_cap=settings.min_market_cap_usd,
         max_market_cap=settings.max_market_cap_usd,
         min_liquidity=settings.min_liquidity_usd,
@@ -92,6 +92,12 @@ def debate_prompt(role: str, settings: Settings) -> str:
         momentum_min_change=settings.momentum_min_price_change_m5_pct,
         momentum_surge=settings.momentum_volume_surge_multiple,
         momentum_buy_share=settings.momentum_min_buy_share_pct,
+        momentum_max_trailing_share=settings.momentum_max_trailing_buy_share_pct,
+        momentum_max_change=settings.momentum_max_price_change_m5_pct,
+        momentum_max_hour=settings.momentum_max_price_change_h1_pct,
+        fast_change=settings.momentum_fast_min_price_change_pct,
+        fast_seconds=settings.momentum_fast_window_seconds,
+        clearance_minutes=settings.clearance_minutes,
     )
     return f"{load_prompt(role)}\n{baseline}"
 

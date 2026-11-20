@@ -14,7 +14,15 @@ from desk.brokers.paper import PaperBroker
 from desk.data.http import DataError
 from desk.data.jupiter import Order
 from desk.debate import Debate
-from desk.domain.models import Candidate, ExitReason, FilterVerdict, KillReason, KillRule
+from desk.domain.models import (
+    Candidate,
+    Clearance,
+    ExitReason,
+    FilterVerdict,
+    KillReason,
+    KillRule,
+    TxnCounts,
+)
 from desk.pipeline import Pipeline
 from desk.portfolio import Portfolio
 from desk.storage.debate_log import EventLog
@@ -469,10 +477,165 @@ async def test_the_strongest_volume_surge_is_evaluated_first(settings, store):
     assert desk.filter.seen == ["STRONG", "MILD"]
 
 
+async def test_a_token_that_is_already_extended_never_reaches_the_filter(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    for change in ({"m5": 25.0, "h1": 40.0}, {"m5": 6.0, "h1": 240.0}):
+        desk.pipeline._scout = FakeScout([make_candidate(price_change_pct=change)])
+        assert await desk.pipeline.run_cycle() == []
+    assert desk.filter.seen == []
+
+
 async def test_the_dossier_ends_with_the_momentum_numbers(settings):
     from desk.dossier import build_dossier
 
     facts = build_dossier(make_verdict(), settings, NOW).facts
     assert facts[-1].category == "momentum"
+    assert "it has just triggered" in facts[-1].statement
     assert "4.0x its trailing-hour" in facts[-1].statement
     assert facts[0].id == "F1" and facts[0].category == "market"
+
+    warming = build_dossier(make_verdict(**WARM), settings, NOW).facts
+    assert "warming up and has not triggered yet" in warming[-1].statement
+
+
+# --- Clearing in advance, and buying without a debate ----------------------------
+
+# Building but not broken out: +1% in 5m on a 1.2x volume surge.
+WARM = {
+    "price_change_pct": {"m5": 1.0, "h1": 20.0},
+    "volume_usd": {"m5": 3_000, "h1": 30_000},
+}
+
+
+def preclearing(settings):
+    """Clearing in advance is off by default; these tests switch it on."""
+    return settings.model_copy(update={"preclear_debates_per_hour": 4})
+
+
+async def clear_in_advance(desk: Desk) -> Clearance:
+    """The token warms up and wins its debate before it has triggered."""
+    desk.pipeline._scout = FakeScout([make_candidate(**WARM)])
+    assert await desk.pipeline.watch() == []
+    assert await desk.pipeline.clear_next() is None  # cleared, not bought
+    clearance = desk.store.clearance(desk.candidate.mint, NOW)
+    assert clearance is not None
+    desk.llm.calls.clear()
+    return clearance
+
+
+async def test_a_warm_token_is_debated_before_it_triggers(settings, store):
+    desk = Desk(preclearing(settings), store, winning_llm())
+    clearance = await clear_in_advance(desk)
+
+    assert store.open_positions() == []
+    assert clearance.expires_at == NOW + timedelta(minutes=settings.clearance_minutes)
+    assert not store.on_cooldown(desk.candidate.mint, NOW)  # free to trigger
+    assert await desk.pipeline.clear_next() is None
+    assert desk.llm.calls == []  # a cleared token is not debated again
+
+
+async def test_a_cleared_token_is_bought_without_a_debate_when_it_triggers(settings, store):
+    desk = Desk(preclearing(settings), store, winning_llm())
+    clearance = await clear_in_advance(desk)
+
+    desk.pipeline._scout = FakeScout([desk.candidate])  # it breaks out
+    (position,) = await desk.pipeline.watch()
+
+    assert desk.llm.calls == []
+    assert desk.filter.seen == ["TEST"]  # filtered once, when it was cleared
+    assert position.debate_id == clearance.debate_id
+    assert store.clearance(desk.candidate.mint, NOW) is None  # a clearance buys once
+    assert store.on_cooldown(desk.candidate.mint, NOW + timedelta(hours=23))
+
+
+async def test_a_vetoed_warm_token_cools_down_and_is_not_bought(settings, store):
+    desk = Desk(preclearing(settings), store, vetoing_llm())
+    desk.pipeline._scout = FakeScout([make_candidate(**WARM)])
+    await desk.pipeline.watch()
+    assert await desk.pipeline.clear_next() is None
+    assert store.clearance(desk.candidate.mint, NOW) is None
+
+    desk.pipeline._scout = FakeScout([desk.candidate])
+    assert await desk.pipeline.watch() == []
+    assert store.on_cooldown(desk.candidate.mint, NOW + timedelta(hours=5))
+
+
+async def test_an_expired_clearance_does_not_buy(settings, store):
+    desk = Desk(preclearing(settings), store, winning_llm())
+    clearance = await clear_in_advance(desk)
+    store.save_clearance(clearance.model_copy(update={"expires_at": NOW - timedelta(minutes=1)}))
+
+    desk.pipeline._scout = FakeScout([desk.candidate])
+    assert await desk.pipeline.watch() == []
+    assert store.open_positions() == []
+    assert desk.pipeline._queue[0].mint == desk.candidate.mint  # back in line for a debate
+
+
+async def test_warm_tokens_are_only_debated_within_their_hourly_budget(settings, store):
+    desk = Desk(settings.model_copy(update={"preclear_debates_per_hour": 0}), store, winning_llm())
+    desk.pipeline._scout = FakeScout([make_candidate(**WARM)])
+    await desk.pipeline.watch()
+    assert await desk.pipeline.clear_next() is None
+    assert desk.llm.calls == [] and desk.filter.seen == []
+
+    desk.pipeline._scout = FakeScout([desk.candidate])  # a triggered token is still debated
+    await desk.pipeline.watch()
+    assert await desk.pipeline.clear_next() is not None
+
+
+async def test_a_token_being_debated_is_not_picked_up_twice(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    await desk.pipeline.watch()
+    desk.pipeline._clearing.add(desk.candidate.mint)  # its debate is still running
+    assert await desk.pipeline.clear_next() is None
+    assert desk.llm.calls == []
+
+
+async def test_a_price_that_fell_back_during_the_debate_cancels_the_buy(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    desk.market.price = desk.candidate.price_usd * 0.995
+    assert await desk.pipeline.run_cycle() == []
+    assert store.open_positions() == []
+    # The debate was won, so the token stays cleared and may still break out again.
+    assert store.clearance(desk.candidate.mint, NOW) is not None
+
+
+async def test_sellers_taking_over_during_the_debate_cancels_the_buy(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    desk.market.candidate = desk.candidate.model_copy(
+        update={"txns_m5": TxnCounts(buys=20, sells=40)}
+    )
+    assert await desk.pipeline.run_cycle() == []
+    assert store.open_positions() == []
+
+
+async def test_a_skipped_buy_is_not_retried_on_the_very_next_scan(settings, store):
+    desk = Desk(preclearing(settings), store, winning_llm())
+    await clear_in_advance(desk)
+    desk.pipeline._scout = FakeScout([desk.candidate])
+    desk.market.price = desk.candidate.price_usd * 0.99  # stalled at the buy
+    assert await desk.pipeline.watch() == []
+
+    desk.market.price = desk.candidate.price_usd
+    assert await desk.pipeline.watch() == []  # left alone for a minute
+
+
+async def test_a_rise_in_the_desks_own_prices_buys_before_the_five_minute_figures(settings, store):
+    desk = Desk(settings, store, winning_llm())
+    now = [NOW]
+    desk.pipeline._clock = lambda: now[0]
+    building = {
+        "price_change_pct": {"m5": 1.0, "h1": 20.0},
+        "volume_usd": {"m5": 4_000, "h1": 30_000},
+    }
+    opened: list = []
+    for scan, price in enumerate([0.001, 0.00101, 0.00102, 0.00103]):
+        now[0] = NOW + timedelta(seconds=25 * scan)
+        desk.market.price = price
+        desk.pipeline._scout = FakeScout([make_candidate(price_usd=price, **building)])
+        opened = await desk.pipeline.run_cycle()
+        if scan < 3:
+            assert opened == []  # warm, but not yet moving
+
+    (position,) = opened
+    assert position.entry_price_usd == pytest.approx(0.00103)

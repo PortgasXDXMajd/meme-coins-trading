@@ -1,6 +1,6 @@
 """Entry point: wires the desk together and runs it.
 
-desk run                 run until stopped (feeds loop + discovery loop + risk loop)
+desk run                 run until stopped (feeds, discovery, clearance and risk loops)
 desk once [--no-debate]  one discovery pass, then exit
 desk report [--ai]       summary of the last N hours
 desk ui                  read-only Streamlit dashboard
@@ -197,10 +197,12 @@ async def run_forever(settings: Settings) -> None:
         )
         # Risk runs on its own loop so a slow debate can never delay a stop. The feeds
         # run on theirs so the watchlist is re-priced often without waiting for them.
+        # Debates run on theirs so a scan can buy a cleared token while one is going on.
         await asyncio.gather(
             _loop("risk", settings.risk_interval_seconds, desk.monitor.check_positions, stop),
             _loop("feeds", settings.discovery_interval_seconds, desk.scout.discover, stop),
-            _loop("discovery", settings.scout_interval_seconds, desk.pipeline.run_cycle, stop),
+            _loop("discovery", settings.scout_interval_seconds, desk.pipeline.watch, stop),
+            _loop("clearance", settings.clearance_interval_seconds, desk.pipeline.clear_next, stop),
         )
         log.info("desk stopped; %d position(s) left open", len(desk.store.open_positions()))
 

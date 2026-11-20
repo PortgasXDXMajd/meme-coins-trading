@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -36,6 +37,43 @@ def in_scout_window(candidate: Candidate, settings: Settings, now: datetime) -> 
 TRAILING_MINUTES = 55.0  # the hour before the last 5 minutes
 WINDOW_MINUTES = 5.0
 
+PriceSample = tuple[datetime, float]  # when the desk saw a price, and the price
+
+
+@dataclass(frozen=True)
+class FastMove:
+    """A token's move over the desk's own recent price samples."""
+
+    change_pct: float  # the latest price against the oldest sample in the window
+    at_high: bool  # the latest price is the highest of the window: still rising
+    seconds: float  # how much time the samples cover
+
+
+def fast_move(samples: Sequence[PriceSample], now: datetime, settings: Settings) -> FastMove | None:
+    """The move over the last `momentum_fast_window_seconds`, from the desk's own scans.
+
+    None until the samples cover most of the window (after a restart, or for a token
+    that has only just been found), or when the newest one is stale.
+    """
+    window = settings.momentum_fast_window_seconds
+    # A scan rarely lands exactly on the window's edge, so allow a little beyond it.
+    recent = [
+        (at, price)
+        for at, price in samples
+        if price > 0 and 0 <= (now - at).total_seconds() <= window * 1.25
+    ]
+    if len(recent) < 3:
+        return None
+    (first_at, first_price), (last_at, last_price) = recent[0], recent[-1]
+    covered = (last_at - first_at).total_seconds()
+    if covered < window * 0.6 or (now - last_at).total_seconds() > window / 2:
+        return None
+    return FastMove(
+        change_pct=100 * (last_price / first_price - 1),
+        at_high=last_price >= max(price for _, price in recent),
+        seconds=covered,
+    )
+
 
 @dataclass(frozen=True)
 class MomentumSignal:
@@ -46,12 +84,16 @@ class MomentumSignal:
     buy_share_pct: float | None  # share of 5m trades that were buys
     trailing_buy_share_pct: float | None  # the same share over the trailing hour
     misses: tuple[str, ...] = ()  # why it did not trigger
+    early: bool = False  # the desk's own price trail shows the move starting
+    fast_change_pct: float | None = None  # price change over that trail
+    fast_seconds: float | None = None
+    warm: bool = False  # not triggered, but building: worth clearing in advance
 
     def describe(self, candidate: Candidate) -> str:
         def number(value: float | None, pattern: str) -> str:
             return "unknown" if value is None else pattern.format(value)
 
-        return (
+        text = (
             f"5m volume ${candidate.volume_usd.m5 or 0:,.0f} is "
             f"{number(self.volume_surge, '{:.1f}x')} its trailing-hour 5-minute average; "
             f"5m buy share {number(self.buy_share_pct, '{:.0f}%')} vs "
@@ -59,6 +101,12 @@ class MomentumSignal:
             f"price {number(candidate.price_change_pct.m5, '{:+.1f}%')} in 5m, "
             f"{number(candidate.price_change_pct.h1, '{:+.1f}%')} in 1h"
         )
+        if self.fast_change_pct is not None and self.fast_seconds is not None:
+            text += (
+                f"; {self.fast_change_pct:+.1f}% over the desk's own last "
+                f"{self.fast_seconds:.0f}s of prices"
+            )
+        return text
 
 
 def _buy_share_pct(buys: int, sells: int) -> float | None:
@@ -66,11 +114,24 @@ def _buy_share_pct(buys: int, sells: int) -> float | None:
     return 100 * buys / total if total > 0 else None
 
 
-def momentum_signal(candidate: Candidate, settings: Settings, now: datetime) -> MomentumSignal:
+def momentum_signal(
+    candidate: Candidate,
+    settings: Settings,
+    now: datetime,
+    samples: Sequence[PriceSample] = (),
+) -> MomentumSignal:
     """Is this token breaking out right now, measured against its own trailing hour?
 
     DexScreener's 1h figures include the last 5 minutes, so the baseline is the hour
     minus those 5 minutes. A pair younger than an hour has a shorter baseline.
+
+    The breakout must also follow an hour that sellers led (see
+    `momentum_max_trailing_buy_share_pct`): unknown trailing flow never triggers.
+
+    The price can qualify two ways: DexScreener's 5-minute change, or (earlier) a rise
+    over the desk's own `samples` that is still at its high. The early way accepts a
+    smaller volume surge, because the 5-minute volume has only begun to fill.
+    A token that is already far up, over 5 minutes or over the hour, never triggers.
     """
     misses: list[str] = []
     volume_m5 = candidate.volume_usd.m5 or 0.0
@@ -78,12 +139,26 @@ def momentum_signal(candidate: Candidate, settings: Settings, now: datetime) -> 
     change_h1 = candidate.price_change_pct.h1
     m5, h1 = candidate.txns_m5, candidate.txns_h1
 
-    if change_m5 is None or change_m5 < settings.momentum_min_price_change_m5_pct:
+    fast = fast_move(samples, now, settings)
+    early = (
+        fast is not None
+        and fast.at_high
+        and fast.change_pct >= settings.momentum_fast_min_price_change_pct
+        and (change_m5 is None or change_m5 > 0)  # not a bounce inside a falling 5 minutes
+    )
+
+    too_fast = change_m5 is not None and change_m5 > settings.momentum_max_price_change_m5_pct
+    falling = change_h1 is None or change_h1 < settings.momentum_min_price_change_h1_pct
+    extended = change_h1 is not None and change_h1 > settings.momentum_max_price_change_h1_pct
+    if too_fast:
+        misses.append("5m price change: most of the move has already happened")
+    elif not early and (change_m5 is None or change_m5 < settings.momentum_min_price_change_m5_pct):
         misses.append("5m price change below the minimum")
-    elif change_m5 > settings.momentum_max_price_change_m5_pct:
-        misses.append("5m price change is a vertical candle")
-    if change_h1 is None or change_h1 < settings.momentum_min_price_change_h1_pct:
+    if falling:
         misses.append("1h price change below the minimum")
+    elif extended:
+        misses.append("1h price change: already extended")
+
     if volume_m5 < settings.momentum_min_volume_m5_usd:
         misses.append("5m volume too small")
     if m5.buys + m5.sells < settings.momentum_min_txns_m5:
@@ -94,9 +169,14 @@ def momentum_signal(candidate: Candidate, settings: Settings, now: datetime) -> 
     surge = None
     if trailing_minutes >= WINDOW_MINUTES and earlier_volume > 0:
         surge = volume_m5 / (earlier_volume * WINDOW_MINUTES / trailing_minutes)
+    needed_surge = (
+        settings.momentum_fast_volume_surge_multiple
+        if early
+        else settings.momentum_volume_surge_multiple
+    )
     if surge is None:
         misses.append("no trailing-hour volume to compare with")
-    elif surge < settings.momentum_volume_surge_multiple:
+    elif surge < needed_surge:
         misses.append("5m volume is not above the trailing hour")
 
     buy_share = _buy_share_pct(m5.buys, m5.sells)
@@ -105,6 +185,23 @@ def momentum_signal(candidate: Candidate, settings: Settings, now: datetime) -> 
         misses.append("5m buy share below the minimum")
     elif trailing_share is not None and buy_share < trailing_share:
         misses.append("5m buy share is below the trailing hour")
+    max_trailing_share = settings.momentum_max_trailing_buy_share_pct
+    if max_trailing_share < 100 and (trailing_share is None or trailing_share > max_trailing_share):
+        misses.append("trailing hour was not seller-led")
+
+    # Warm: has not broken out, but is trading at least as hard as its own hour with
+    # buyers in front, and is neither falling nor already extended.
+    warm = (
+        bool(misses)
+        and not (too_fast or falling or extended)
+        and (change_m5 is None or change_m5 >= 0)
+        and volume_m5 >= settings.momentum_min_volume_m5_usd / 2
+        and m5.buys + m5.sells >= settings.momentum_min_txns_m5 / 2
+        and surge is not None
+        and surge >= settings.warm_min_volume_surge_multiple
+        and buy_share is not None
+        and buy_share >= settings.warm_min_buy_share_pct
+    )
 
     return MomentumSignal(
         triggered=not misses,
@@ -112,6 +209,10 @@ def momentum_signal(candidate: Candidate, settings: Settings, now: datetime) -> 
         buy_share_pct=buy_share,
         trailing_buy_share_pct=trailing_share,
         misses=tuple(misses),
+        early=early,
+        fast_change_pct=fast.change_pct if fast else None,
+        fast_seconds=fast.seconds if fast else None,
+        warm=warm,
     )
 
 
@@ -236,6 +337,23 @@ def position_size_usd(equity_usd: float, cash_usd: float, settings: Settings) ->
 
 def entry_drift_pct(reference_price: float, current_price: float) -> float:
     return abs(current_price - reference_price) / reference_price * 100
+
+
+def entry_stall(trigger_price: float, fresh: Candidate, settings: Settings) -> str | None:
+    """Why the move has stalled since the trigger, or None while it is still alive.
+
+    Buying after the price has turned down, or once sellers lead, is buying the top.
+    Unknown flow counts as stalled (fail closed).
+    """
+    slip = 100 * (1 - fresh.price_usd / trigger_price)
+    if slip > settings.max_entry_slip_pct:
+        return f"the move stalled: price is {slip:.1f}% below the trigger price"
+    share = _buy_share_pct(fresh.txns_m5.buys, fresh.txns_m5.sells)
+    if share is None:
+        return "the move stalled: no trades in the last 5 minutes"
+    if share < settings.min_entry_buy_share_pct:
+        return f"the move stalled: only {share:.0f}% of the last 5 minutes' trades are buys"
+    return None
 
 
 # --------------------------------------------------------------------------

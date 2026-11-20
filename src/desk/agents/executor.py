@@ -10,6 +10,7 @@ from desk.data.http import DataError
 from desk.domain.models import ExitReason, Position, TradeApproval, utcnow
 from desk.domain.rules import (
     entry_drift_pct,
+    entry_stall,
     initial_stop_price,
     liquidity_kills,
     position_size_usd,
@@ -51,16 +52,20 @@ class Executor:
             raise TypeError("Executor.buy requires a TradeApproval from Risk")
         approved = approval.candidate
 
-        # The debate took minutes; make sure the market is still the one that was debated.
+        # Time has passed since the trigger (a debate, when the token was not cleared in
+        # advance): make sure the move the desk wanted to ride is still there.
         try:
             fresh = await self._dex.snapshot(approved.mint)
         except DataError as exc:
             return self._skip(approved.symbol, f"no fresh price: {exc}")
         if fresh is None:
             return self._skip(approved.symbol, "pair no longer returns data")
+        stalled = entry_stall(approved.price_usd, fresh, self._settings)
+        if stalled:
+            return self._skip(approved.symbol, stalled)
         drift = entry_drift_pct(approved.price_usd, fresh.price_usd)
         if drift > self._settings.max_entry_drift_pct:
-            return self._skip(approved.symbol, f"price moved {drift:.1f}% during the debate")
+            return self._skip(approved.symbol, f"price moved {drift:.1f}% since the trigger")
         if liquidity_kills(fresh, self._settings):
             return self._skip(approved.symbol, "liquidity fell below the minimum")
 

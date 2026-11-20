@@ -6,10 +6,12 @@ from datetime import timedelta
 
 import pytest
 
-from desk.domain.models import ExitReason, KillRule, Position, RoundTrip
+from desk.domain.models import ExitReason, KillRule, Position, RoundTrip, TxnCounts
 from desk.domain.rules import (
     check_stop,
     daily_loss_breached,
+    entry_stall,
+    fast_move,
     in_scout_window,
     initial_stop_price,
     liquidity_kills,
@@ -35,8 +37,8 @@ def rules_of(kills) -> set[KillRule]:
     [
         (timedelta(minutes=29), 1_000_000, False),  # too young
         (timedelta(minutes=30), 1_000_000, True),
-        (timedelta(hours=72), 1_000_000, True),
-        (timedelta(hours=72, minutes=1), 1_000_000, False),  # too old
+        (timedelta(days=30), 1_000_000, True),
+        (timedelta(days=30, minutes=1), 1_000_000, False),  # too old
         (timedelta(hours=2), 299_999, False),  # too small
         (timedelta(hours=2), 300_000, True),
         (timedelta(hours=2), 20_000_000, True),
@@ -253,14 +255,18 @@ def test_a_breakout_against_the_trailing_hour_triggers(settings):
     # $8k in 5m against ($30k - $8k) spread over the 11 earlier 5-minute windows.
     assert signal.volume_surge == pytest.approx(4.0)
     assert signal.buy_share_pct == pytest.approx(100 * 60 / 90)
-    assert signal.trailing_buy_share_pct == pytest.approx(100 * 240 / 460)
+    assert signal.trailing_buy_share_pct == pytest.approx(100 * 220 / 500)
 
 
 @pytest.mark.parametrize(
     ("overrides", "miss"),
     [
         ({"price_change_pct": {"m5": 2.9, "h1": 20}}, "5m price change below the minimum"),
-        ({"price_change_pct": {"m5": 41, "h1": 20}}, "5m price change is a vertical candle"),
+        (
+            {"price_change_pct": {"m5": 16, "h1": 20}},
+            "5m price change: most of the move has already happened",
+        ),
+        ({"price_change_pct": {"m5": 6, "h1": 61}}, "1h price change: already extended"),
         ({"price_change_pct": {"m5": 6, "h1": -1}}, "1h price change below the minimum"),
         ({"price_change_pct": {}}, "5m price change below the minimum"),  # unknown: fail closed
         ({"volume_usd": {"m5": 2_999, "h1": 4_000}}, "5m volume too small"),
@@ -269,6 +275,10 @@ def test_a_breakout_against_the_trailing_hour_triggers(settings):
         ({"volume_usd": {"m5": 8_000, "h1": 8_000}}, "no trailing-hour volume to compare with"),
         ({"txns_m5": {"buys": 48, "sells": 42}}, "5m buy share below the minimum"),
         ({"txns_h1": {"buys": 500, "sells": 100}}, "5m buy share is below the trailing hour"),
+        # Buyers already led the hour before the breakout: 240 of 460 trades (52%).
+        ({"txns_h1": {"buys": 300, "sells": 250}}, "trailing hour was not seller-led"),
+        # No trades before the last 5 minutes: unknown, fail closed.
+        ({"txns_h1": {"buys": 60, "sells": 30}}, "trailing hour was not seller-led"),
     ],
 )
 def test_momentum_misses(settings, overrides, miss):
@@ -286,3 +296,128 @@ def test_a_young_pair_is_compared_with_the_minutes_it_has_traded(settings):
 def test_momentum_thresholds_come_from_settings(settings):
     strict = settings.model_copy(update={"momentum_volume_surge_multiple": 5.0})
     assert not momentum_signal(make_candidate(), strict, NOW).triggered
+
+
+def test_the_seller_led_hour_gate_comes_from_settings(settings):
+    buyer_led = make_candidate(txns_h1={"buys": 300, "sells": 250})  # 52% buys before the 5m
+    assert settings.momentum_max_trailing_buy_share_pct == 50
+    assert not momentum_signal(buyer_led, settings, NOW).triggered
+    looser = settings.model_copy(update={"momentum_max_trailing_buy_share_pct": 55})
+    assert momentum_signal(buyer_led, looser, NOW).triggered
+    # 100 turns the gate off, even when the trailing hour's flow is unknown.
+    off = settings.model_copy(update={"momentum_max_trailing_buy_share_pct": 100})
+    assert (
+        "trailing hour was not seller-led"
+        not in momentum_signal(make_candidate(txns_h1={"buys": 60, "sells": 30}), off, NOW).misses
+    )
+
+
+def test_tokens_are_not_debated_before_they_trigger_by_default(settings):
+    assert settings.preclear_debates_per_hour == 0
+
+
+# --- Early trigger: the desk's own price trail ---------------------------------
+
+# Too little for the 5-minute trigger: +1% in 5m on a 1.7x volume surge.
+BUILDING = {
+    "price_change_pct": {"m5": 1.0, "h1": 20.0},
+    "volume_usd": {"m5": 4_000, "h1": 30_000},
+}
+
+
+def trail(*prices: float, step_seconds: float = 25):
+    """Prices the desk saw, one scan apart, the last of them at NOW."""
+    last = len(prices) - 1
+    return [
+        (NOW - timedelta(seconds=step_seconds * (last - n)), price)
+        for n, price in enumerate(prices)
+    ]
+
+
+def test_a_rise_over_the_desks_own_prices_triggers_early(settings):
+    candidate = make_candidate(**BUILDING)
+    assert not momentum_signal(candidate, settings, NOW).triggered
+
+    signal = momentum_signal(candidate, settings, NOW, trail(1.00, 1.01, 1.02, 1.03))
+    assert signal.triggered and signal.early
+    assert signal.fast_change_pct == pytest.approx(3.0)
+    assert "+3.0% over the desk's own last 75s of prices" in signal.describe(candidate)
+
+
+@pytest.mark.parametrize(
+    ("prices", "why"),
+    [
+        ((1.00, 1.01, 1.015, 1.018), "up less than 2%"),
+        ((1.00, 1.04, 1.05, 1.03), "no longer at its high"),
+        ((1.00, 1.03), "too few samples to cover the window"),
+    ],
+)
+def test_the_early_trigger_needs_a_rise_that_is_still_going(settings, prices, why):
+    signal = momentum_signal(make_candidate(**BUILDING), settings, NOW, trail(*prices))
+    assert not signal.triggered, why
+
+
+def test_the_early_trigger_still_needs_volume_buyers_and_room(settings):
+    rising = trail(1.00, 1.01, 1.02, 1.03)
+
+    def triggered(**overrides) -> bool:
+        return momentum_signal(
+            make_candidate(**(BUILDING | overrides)), settings, NOW, rising
+        ).triggered
+
+    assert not triggered(volume_usd={"m5": 3_000, "h1": 30_000})  # 1.2x: below 1.3x
+    assert not triggered(txns_m5={"buys": 40, "sells": 50})
+    assert not triggered(price_change_pct={"m5": 1.0, "h1": 80.0})  # already extended
+    assert not triggered(price_change_pct={"m5": -2.0, "h1": 20.0})  # a bounce in a falling 5m
+
+
+def test_old_or_stale_samples_are_not_a_move(settings):
+    old = [(at - timedelta(minutes=10), price) for at, price in trail(1.00, 1.01, 1.02, 1.03)]
+    assert fast_move(old, NOW, settings) is None
+    stale = [(at - timedelta(seconds=60), price) for at, price in trail(1.00, 1.01, 1.02)]
+    assert fast_move(stale, NOW, settings) is None
+
+
+def test_a_token_that_is_building_but_has_not_broken_out_is_warm(settings):
+    assert momentum_signal(make_candidate(**BUILDING), settings, NOW).warm
+    assert not momentum_signal(make_candidate(), settings, NOW).warm  # triggered, not warm
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"price_change_pct": {"m5": 1.0, "h1": 80.0}},  # already extended
+        {"price_change_pct": {"m5": 1.0, "h1": -3.0}},  # falling hour
+        {"price_change_pct": {"m5": -1.0, "h1": 20.0}},  # falling now
+        {"volume_usd": {"m5": 1_000, "h1": 30_000}},  # hardly trading
+        {"volume_usd": {"m5": 2_000, "h1": 30_000}},  # below its own hour
+        {"txns_m5": {"buys": 40, "sells": 50}},  # sellers lead
+    ],
+)
+def test_a_token_that_is_not_building_is_not_warm(settings, overrides):
+    assert not momentum_signal(make_candidate(**(BUILDING | overrides)), settings, NOW).warm
+
+
+# --- Stall check at the buy ----------------------------------------------------
+
+
+def test_a_move_that_is_still_alive_is_not_stalled(settings):
+    assert entry_stall(0.001, make_candidate(price_usd=0.001), settings) is None
+    assert entry_stall(0.001, make_candidate(price_usd=0.00104), settings) is None
+
+
+def test_a_price_back_below_the_trigger_is_a_stall(settings):
+    assert "below the trigger price" in (
+        entry_stall(0.001, make_candidate(price_usd=0.000995), settings) or ""
+    )
+    lenient = settings.model_copy(update={"max_entry_slip_pct": 1.0})
+    assert entry_stall(0.001, make_candidate(price_usd=0.000995), lenient) is None
+
+
+def test_sellers_taking_over_is_a_stall(settings):
+    selling = make_candidate(txns_m5=TxnCounts(buys=20, sells=40))
+    assert "33% of the last 5 minutes' trades are buys" in (
+        entry_stall(0.001, selling, settings) or ""
+    )
+    silent = make_candidate(txns_m5=TxnCounts())
+    assert "no trades" in (entry_stall(0.001, silent, settings) or "")

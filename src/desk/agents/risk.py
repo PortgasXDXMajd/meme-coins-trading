@@ -20,6 +20,7 @@ from desk.config import Settings
 from desk.data.http import DataError
 from desk.domain.models import (
     BearReason,
+    Candidate,
     DebateOutcome,
     Dossier,
     ExitReason,
@@ -106,11 +107,16 @@ class RiskOfficer:
             return f"not enough cash for a minimum trade (${cash:.2f})"
         return None
 
-    async def approve(self, outcome: DebateOutcome) -> TradeApproval | None:
-        """Issue the approval for a won debate, with the stop set before entry."""
+    async def approve(
+        self, outcome: DebateOutcome, trigger: Candidate | None = None
+    ) -> TradeApproval | None:
+        """Issue the approval for a won debate, with the stop set before entry.
+
+        `trigger` is the snapshot that set off the buy, when that is later than the debate.
+        """
         if not outcome.approved:
             return None
-        sol_price = outcome.dossier.candidate.sol_price_usd
+        sol_price = (trigger or outcome.dossier.candidate).sol_price_usd
         block = await self.entry_block(sol_price)
         if block:
             log.info("risk: entry blocked for %s: %s", outcome.dossier.candidate.symbol, block)
@@ -119,6 +125,7 @@ class RiskOfficer:
         cash = await self._portfolio.cash_usd(sol_price)
         return TradeApproval(
             outcome=outcome,
+            trigger=trigger,
             stop_loss_pct=self._settings.stop_loss_pct,
             max_size_usd=position_size_usd(equity, cash, self._settings),
         )

@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from desk.domain.models import DebateOutcome, ExitReason, Position, utcnow
+from desk.domain.models import Clearance, DebateOutcome, ExitReason, Position, utcnow
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (
@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS debates (
     cost_usd REAL NOT NULL,
     transcript_path TEXT NOT NULL,
     outcome TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS clearances (
+    mint TEXT PRIMARY KEY,
+    expires_at TEXT NOT NULL,
+    data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,6 +233,34 @@ class Store:
             "SELECT transcript_path FROM debates WHERE id = ?", (debate_id,)
         ).fetchone()
         return None if row is None else row["transcript_path"]
+
+    # --- clearances ----------------------------------------------------------
+
+    def save_clearance(self, clearance: Clearance) -> None:
+        self._db.execute(
+            "INSERT INTO clearances (mint, expires_at, data) VALUES (?, ?, ?) "
+            "ON CONFLICT (mint) DO UPDATE SET expires_at = excluded.expires_at, "
+            "data = excluded.data",
+            (clearance.mint, clearance.expires_at.isoformat(), clearance.model_dump_json()),
+        )
+
+    def clearance(self, mint: str, now: datetime) -> Clearance | None:
+        """The token's clearance, if it has one that has not expired."""
+        row = self._db.execute(
+            "SELECT data FROM clearances WHERE mint = ? AND expires_at > ?",
+            (mint, now.isoformat()),
+        ).fetchone()
+        return None if row is None else Clearance.model_validate_json(row["data"])
+
+    def clearances(self, now: datetime) -> list[Clearance]:
+        rows = self._db.execute(
+            "SELECT data FROM clearances WHERE expires_at > ? ORDER BY expires_at",
+            (now.isoformat(),),
+        ).fetchall()
+        return [Clearance.model_validate_json(row["data"]) for row in rows]
+
+    def drop_clearance(self, mint: str) -> None:
+        self._db.execute("DELETE FROM clearances WHERE mint = ?", (mint,))
 
     # --- positions -----------------------------------------------------------
 

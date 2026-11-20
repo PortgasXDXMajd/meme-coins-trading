@@ -15,7 +15,7 @@ from desk.domain.models import (
     TxnCounts,
     utcnow,
 )
-from desk.domain.rules import momentum_signal
+from desk.domain.rules import MomentumSignal, momentum_signal
 
 HOLDERS_LISTED = 10
 
@@ -148,19 +148,30 @@ def _execution_facts(r: RoundTrip) -> list[tuple[str, str]]:
     ]
 
 
+def _momentum_fact(candidate: Candidate, signal: MomentumSignal) -> str:
+    numbers = signal.describe(candidate)
+    if signal.triggered:
+        return f"Why the desk is looking now: it has just triggered. {numbers}."
+    return f"Why the desk is looking now: it is warming up and has not triggered yet. {numbers}."
+
+
 def build_dossier(
-    verdict: FilterVerdict, settings: Settings, now: datetime | None = None
+    verdict: FilterVerdict,
+    settings: Settings,
+    now: datetime | None = None,
+    signal: MomentumSignal | None = None,
 ) -> Dossier:
+    """`signal` is the momentum reading that put the token in front of the debate."""
     if not verdict.passed or verdict.safety is None or verdict.round_trip is None:
         raise ValueError("a dossier is only built for candidates that passed the Filter")
     now = now or utcnow()
-    signal = momentum_signal(verdict.candidate, settings, now)
+    signal = signal or momentum_signal(verdict.candidate, settings, now)
     entries = (
         _market_facts(verdict.candidate, now)
         + _safety_facts(verdict.safety, settings)
         + _execution_facts(verdict.round_trip)
         # Last, so the numbering of the facts above never depends on it.
-        + [("momentum", f"Why the desk is looking now: {signal.describe(verdict.candidate)}.")]
+        + [("momentum", _momentum_fact(verdict.candidate, signal))]
     )
     facts = tuple(
         Fact(id=f"F{number}", category=category, statement=statement)
